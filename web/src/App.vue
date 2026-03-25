@@ -64,7 +64,7 @@ onBeforeUnmount(() => {
         <p class="eyebrow">Eyes on Me / Rust Monolith</p>
         <h1>Eyes on Me</h1>
         <p class="lede">
-          先看设备汇总，再钻进单机明细和时间范围分析。现在这套页面就是 Eyes on Me 的监控工作台。
+          打开首页就是全局分析，再继续钻进单机明细和设备分析。现在这套页面就是 Eyes on Me 的监控工作台。
         </p>
       </div>
 
@@ -76,19 +76,20 @@ onBeforeUnmount(() => {
     </section>
 
     <nav class="top-nav">
-      <RouterLink class="nav-link" to="/">设备汇总</RouterLink>
-      <RouterLink class="nav-link" to="/analysis">分析页</RouterLink>
-      <span class="muted">选择设备后进入明细页或设备分析页</span>
+      <!-- <RouterLink class="nav-link" to="/">设备汇总</RouterLink> -->
+      <!-- <RouterLink class="nav-link" to="/analysis">分析页</RouterLink> -->
+      <!-- <span class="muted">选择设备后进入明细页或设备分析页</span> -->
     </nav>
 
-    <RouterView v-slot="{ Component, route }">
-      <component
-        :is="Component"
-        :key="route.fullPath"
-        :connection="connection"
-        :now-ms="nowMs"
-        :refresh-token="refreshToken"
-      />
+    <RouterView v-slot="{ Component }">
+      <KeepAlive>
+        <component
+          :is="Component"
+          :connection="connection"
+          :now-ms="nowMs"
+          :refresh-token="refreshToken"
+        />
+      </KeepAlive>
     </RouterView>
   </main>
 </template>

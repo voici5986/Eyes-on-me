@@ -1,10 +1,21 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
-import { fetchAnalysisOverview } from "../api";
-import { formatDateTime, formatDurationLong, formatTime, usageShare } from "../lib/activity";
+import { fetchAnalysisOverview, fetchDevices, peekAnalysisOverview, peekDevices } from "../api";
+import {
+  activityDurationMs,
+  activityHeadline,
+  activitySubline,
+  activityUrl,
+  formatDateTime,
+  formatDuration,
+  formatDurationLong,
+  formatTime,
+  usageShare
+} from "../lib/activity";
 import { ANALYSIS_RANGE_OPTIONS, analysisRangeLabel, normalizeAnalysisRange } from "../lib/analysis-range";
-import type { AnalysisOverviewResponse, AnalysisRange } from "../types";
+import DeviceSummaryCard from "../components/DeviceSummaryCard.vue";
+import type { AnalysisOverviewResponse, AnalysisRange, DevicesResponse } from "../types";
 
 const props = defineProps<{
   connection: "connecting" | "live" | "closed";
@@ -14,26 +25,61 @@ const props = defineProps<{
 
 const route = useRoute();
 const router = useRouter();
-
-const loading = ref(true);
-const error = ref<string | null>(null);
-const analysisResponse = ref<AnalysisOverviewResponse | null>(null);
 const selectedRange = computed(() => normalizeAnalysisRange(route.query.range));
+
+const initialAnalysis = peekAnalysisOverview(selectedRange.value);
+const initialDevices = peekDevices();
+const loading = ref(!initialAnalysis || !initialDevices);
+const error = ref<string | null>(null);
+const analysisResponse = ref<AnalysisOverviewResponse | null>(initialAnalysis);
+const devicesResponse = ref<DevicesResponse | null>(initialDevices);
 
 const topAppUsage = computed(() => analysisResponse.value?.topAppUsage ?? []);
 const topDomainUsage = computed(() => analysisResponse.value?.topDomainUsage ?? []);
 const devices = computed(() => analysisResponse.value?.devices ?? []);
+const deviceOverviewById = computed(() => {
+  return new Map((devicesResponse.value?.devices ?? []).map((item) => [item.device.deviceId, item]));
+});
+const deviceCards = computed(() =>
+  devices.value.map((device) => {
+    const overview = deviceOverviewById.value.get(device.deviceId);
+    const currentDevice = overview?.device;
+    const latestStatus = overview?.latestStatus;
+
+    return {
+      deviceId: device.deviceId,
+      headline: currentDevice ? activityHeadline(currentDevice) : (device.latestStatusText || device.currentLabel),
+      metaLine: currentDevice
+        ? `${currentDevice.app.name} · ${currentDevice.platform} · 已持续 ${formatDuration(activityDurationMs(currentDevice, props.nowMs))}`
+        : `${device.platform} · 当前设备在线`,
+      summaryLine: currentDevice
+        ? (latestStatus?.statusText || activitySubline(currentDevice))
+        : (device.latestStatusText || device.currentLabel),
+      url: currentDevice ? activityUrl(currentDevice) : null,
+      topBadge: `${device.eventCount} 次切换`,
+      footerMeta: [
+        `使用时长 ${formatDurationLong(device.totalTrackedMs)}`,
+        `最近更新 ${formatTime(currentDevice?.ts || device.lastSeen)}`
+      ]
+    };
+  })
+);
 const hasAnyAnalysis = computed(() =>
   (analysisResponse.value?.deviceCount ?? 0) > 0 ||
   topAppUsage.value.length > 0 ||
   topDomainUsage.value.length > 0
 );
 
-async function loadData() {
-  loading.value = true;
+async function loadData(force = false) {
+  loading.value = !analysisResponse.value || !devicesResponse.value;
 
   try {
-    analysisResponse.value = await fetchAnalysisOverview(selectedRange.value);
+    const [analysis, devices] = await Promise.all([
+      fetchAnalysisOverview(selectedRange.value, force),
+      fetchDevices(force)
+    ]);
+    analysisResponse.value = analysis;
+    devicesResponse.value = devices;
     error.value = null;
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err);
@@ -55,8 +101,19 @@ async function updateRange(range: AnalysisRange) {
   });
 }
 
-onMounted(loadData);
-watch([selectedRange, () => props.refreshToken], loadData);
+onMounted(() => {
+  if (loading.value) {
+    void loadData();
+  }
+});
+watch(selectedRange, () => {
+  analysisResponse.value = peekAnalysisOverview(selectedRange.value);
+  devicesResponse.value = peekDevices();
+  void loadData();
+});
+watch(() => props.refreshToken, () => {
+  void loadData(true);
+});
 </script>
 
 <template>
@@ -70,7 +127,7 @@ watch([selectedRange, () => props.refreshToken], loadData);
 
   <template v-else-if="analysisResponse">
     <section class="page-actions">
-      <RouterLink class="button-link" to="/">返回汇总</RouterLink>
+      <!-- <RouterLink class="button-link" to="/">返回首页</RouterLink> -->
       <span class="muted">连接状态：{{ connection }}</span>
       <span class="muted">统计范围：{{ analysisRangeLabel(selectedRange) }}</span>
       <span class="muted">生成时间：{{ formatTime(analysisResponse.generatedAt) }}</span>
@@ -149,21 +206,22 @@ watch([selectedRange, () => props.refreshToken], loadData);
           <span>{{ devices.length }}</span>
         </div>
 
-        <ul class="usage-list">
-          <li v-for="device in devices" :key="device.deviceId" class="usage-item">
-            <div class="usage-copy">
-              <strong>{{ device.deviceId }}</strong>
-              <p>{{ device.latestStatusText || device.currentLabel }}</p>
-              <span class="inline-meta">{{ device.platform }} · {{ device.eventCount }} 次切换 · 最近 {{ formatDateTime(device.lastSeen) }}</span>
-            </div>
-            <div class="usage-side">
-              <strong>{{ formatDurationLong(device.totalTrackedMs) }}</strong>
-              <span class="inline-meta">{{ usageShare(analysisResponse.totalTrackedMs, device.totalTrackedMs).toFixed(1) }}%</span>
-              <RouterLink class="button-link" :to="`/devices/${encodeURIComponent(device.deviceId)}/analysis?range=${selectedRange}`">
-                查看设备分析
-              </RouterLink>
-            </div>
-          </li>
+        <ul class="card-list">
+          <DeviceSummaryCard
+            v-for="device in deviceCards"
+            :key="device.deviceId"
+            :title="device.deviceId"
+            :headline="device.headline"
+            :meta-line="device.metaLine"
+            :summary-line="device.summaryLine"
+            :url="device.url"
+            :top-badge="device.topBadge"
+            :footer-meta="device.footerMeta"
+            :actions="[
+              { label: '查看明细', to: `/devices/${encodeURIComponent(device.deviceId)}` },
+              { label: '分析页', to: `/devices/${encodeURIComponent(device.deviceId)}/analysis?range=${selectedRange}` }
+            ]"
+          />
         </ul>
       </article>
 

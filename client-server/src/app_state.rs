@@ -382,30 +382,28 @@ fn accumulate_app_usage(
     activity: &ActivityEvent,
     tracked_ms: u64,
 ) {
-    let label = activity
-        .window_title
-        .clone()
-        .or_else(|| activity.browser.as_ref().and_then(|browser| browser.page_title.clone()))
-        .or_else(|| activity.app.title.clone())
-        .unwrap_or_else(|| activity.app.name.clone());
+    let is_browser_activity = activity.browser.is_some();
+    let label = if is_browser_activity {
+        activity.app.name.clone()
+    } else {
+        activity
+            .window_title
+            .clone()
+            .or_else(|| activity.app.title.clone())
+            .unwrap_or_else(|| activity.app.name.clone())
+    };
 
-    let sublabel = if let Some(browser) = &activity.browser {
-        browser
-            .domain
-            .as_ref()
-            .map(|domain| format!("{} · {}", activity.app.name, domain))
-            .or_else(|| Some(activity.app.name.clone()))
-    } else if label == activity.app.name {
+    let sublabel = if is_browser_activity || label == activity.app.name {
         Some(activity.app.id.clone())
     } else {
         Some(activity.app.name.clone())
     };
 
-    let key = format!(
-        "app:{}:{}",
-        activity.app.id,
-        label.to_lowercase()
-    );
+    let key = if is_browser_activity {
+        format!("app:{}", activity.app.id)
+    } else {
+        format!("app:{}:{}", activity.app.id, label.to_lowercase())
+    };
 
     merge_usage_entry(
         target,
@@ -495,7 +493,11 @@ fn current_activity_label(activity: &ActivityEvent) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{AnalysisRange, duration_within_window};
+    use std::collections::HashMap;
+
+    use amiokay_shared::{ActivityApp, ActivityEvent, ActivityKind, BrowserContext, Platform};
+
+    use super::{AnalysisRange, accumulate_app_usage, duration_within_window};
     use time::{Duration as TimeDuration, OffsetDateTime};
 
     #[test]
@@ -530,5 +532,42 @@ mod tests {
         let cutoff = Some(now - TimeDuration::hours(3));
 
         assert_eq!(duration_within_window(start, end, cutoff, now), 0);
+    }
+
+    #[test]
+    fn groups_browser_activity_under_browser_app_in_app_usage() {
+        let now = OffsetDateTime::now_utc();
+        let activity = ActivityEvent {
+            event_id: "evt-1".to_string(),
+            ts: now,
+            device_id: "windows-agent".to_string(),
+            agent_name: "client-desktop".to_string(),
+            platform: Platform::Windows,
+            kind: ActivityKind::ForegroundChanged,
+            app: ActivityApp {
+                id: "msedge.exe".to_string(),
+                name: "Microsoft Edge".to_string(),
+                title: None,
+                pid: Some(1234),
+            },
+            window_title: Some("Chaoleme/Eyes-on-me and 45 more pages - Personal".to_string()),
+            browser: Some(BrowserContext {
+                family: "chromium".to_string(),
+                name: "Microsoft Edge".to_string(),
+                page_title: Some("Chaoleme/Eyes-on-me and 45 more pages - Personal".to_string()),
+                url: Some("https://github.com/Chaoleme/Eyes-on-me".to_string()),
+                domain: Some("github.com".to_string()),
+                source: "window-title".to_string(),
+                confidence: 0.9,
+            }),
+            source: "desktop".to_string(),
+        };
+
+        let mut usage = HashMap::new();
+        accumulate_app_usage(&mut usage, &activity, 60_000);
+
+        let bucket = usage.get("app:msedge.exe").expect("browser app bucket");
+        assert_eq!(bucket.label, "Microsoft Edge");
+        assert_eq!(bucket.sublabel.as_deref(), Some("msedge.exe"));
     }
 }

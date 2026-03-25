@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
-import { fetchDeviceAnalysis, fetchDeviceDetail } from "../api";
+import { fetchDeviceAnalysis, fetchDeviceDetail, peekDeviceAnalysis, peekDeviceDetail } from "../api";
 import { activityHeadline, formatDateTime, formatDurationLong, formatTime, usageShare } from "../lib/activity";
 import { ANALYSIS_RANGE_OPTIONS, analysisRangeLabel, normalizeAnalysisRange } from "../lib/analysis-range";
+import { buildDeviceUsageTreemap } from "../lib/device-treemap";
+import LargeTreemap from "../components/LargeTreemap.vue";
 import type { AnalysisRange, DeviceAnalysisResponse, DeviceDetailResponse } from "../types";
 
 const props = defineProps<{
@@ -17,22 +19,25 @@ const router = useRouter();
 const deviceId = computed(() => String(route.params.deviceId ?? ""));
 const selectedRange = computed(() => normalizeAnalysisRange(route.query.range));
 
-const loading = ref(true);
+const initialDetail = peekDeviceDetail(deviceId.value);
+const initialAnalysis = peekDeviceAnalysis(deviceId.value, selectedRange.value);
+const loading = ref(!initialDetail || !initialAnalysis);
 const error = ref<string | null>(null);
-const detail = ref<DeviceDetailResponse | null>(null);
-const analysis = ref<DeviceAnalysisResponse | null>(null);
+const detail = ref<DeviceDetailResponse | null>(initialDetail);
+const analysis = ref<DeviceAnalysisResponse | null>(initialAnalysis);
 
 const appUsage = computed(() => analysis.value?.appUsage ?? []);
 const domainUsage = computed(() => analysis.value?.domainUsage ?? []);
 const hasDeviceAnalysis = computed(() => appUsage.value.length > 0 || domainUsage.value.length > 0);
+const treemapItems = computed(() => buildDeviceUsageTreemap(analysis.value));
 
-async function loadData() {
-  loading.value = true;
+async function loadData(force = false) {
+  loading.value = !detail.value || !analysis.value;
 
   try {
     const [deviceDetail, deviceAnalysis] = await Promise.all([
-      fetchDeviceDetail(deviceId.value),
-      fetchDeviceAnalysis(deviceId.value, selectedRange.value)
+      fetchDeviceDetail(deviceId.value, force),
+      fetchDeviceAnalysis(deviceId.value, selectedRange.value, force)
     ]);
     detail.value = deviceDetail;
     analysis.value = deviceAnalysis;
@@ -57,8 +62,23 @@ async function updateRange(range: AnalysisRange) {
   });
 }
 
-onMounted(loadData);
-watch([deviceId, selectedRange, () => props.refreshToken], loadData);
+onMounted(() => {
+  if (loading.value) {
+    void loadData();
+  }
+});
+watch(deviceId, () => {
+  detail.value = peekDeviceDetail(deviceId.value);
+  analysis.value = peekDeviceAnalysis(deviceId.value, selectedRange.value);
+  void loadData();
+});
+watch(selectedRange, () => {
+  analysis.value = peekDeviceAnalysis(deviceId.value, selectedRange.value);
+  void loadData();
+});
+watch(() => props.refreshToken, () => {
+  void loadData(true);
+});
 </script>
 
 <template>
@@ -73,14 +93,14 @@ watch([deviceId, selectedRange, () => props.refreshToken], loadData);
   <section v-else-if="!detail || !analysis" class="panel">
     <div class="panel-header">
       <h2>设备不存在</h2>
-      <RouterLink class="button-link" to="/">返回汇总</RouterLink>
+      <RouterLink class="button-link" to="/">返回首页</RouterLink>
     </div>
     <p class="muted">当前设备还没有分析上下文。</p>
   </section>
 
   <template v-else>
     <section class="page-actions">
-      <RouterLink class="button-link" to="/">返回汇总</RouterLink>
+      <RouterLink class="button-link" to="/">返回首页</RouterLink>
       <RouterLink class="button-link" :to="`/devices/${encodeURIComponent(deviceId)}`">返回设备明细</RouterLink>
       <span class="muted">连接状态：{{ connection }}</span>
       <span class="muted">统计范围：{{ analysisRangeLabel(selectedRange) }}</span>
@@ -143,6 +163,17 @@ watch([deviceId, selectedRange, () => props.refreshToken], loadData);
           </div>
         </div>
       </article>
+    </section>
+
+    <section class="panel">
+      <LargeTreemap
+        :items="treemapItems"
+        title="应用使用版图"
+        :subtitle="`${analysisRangeLabel(selectedRange)} 内的应用窗口累计前台时长。浏览器只按应用总时长展示，不混入域名层级。`"
+        total-label="累计追踪"
+        :height="560"
+        :value-formatter="formatDurationLong"
+      />
     </section>
 
     <section class="grid">

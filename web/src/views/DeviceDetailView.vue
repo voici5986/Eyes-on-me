@@ -11,7 +11,7 @@ import {
   formatTime,
   recentActivityDurationMs
 } from "../lib/activity";
-import { fetchDeviceAnalysis, fetchDeviceDetail } from "../api";
+import { fetchDeviceAnalysis, fetchDeviceDetail, peekDeviceAnalysis, peekDeviceDetail } from "../api";
 import { DEFAULT_ANALYSIS_RANGE } from "../lib/analysis-range";
 import type { DeviceAnalysisResponse, DeviceDetailResponse } from "../types";
 
@@ -24,22 +24,24 @@ const props = defineProps<{
 const route = useRoute();
 
 const deviceId = computed(() => String(route.params.deviceId ?? ""));
-const loading = ref(true);
+const initialDetail = peekDeviceDetail(deviceId.value);
+const initialAnalysis = peekDeviceAnalysis(deviceId.value, DEFAULT_ANALYSIS_RANGE);
+const loading = ref(!initialDetail || !initialAnalysis);
 const error = ref<string | null>(null);
-const detail = ref<DeviceDetailResponse | null>(null);
-const analysis = ref<DeviceAnalysisResponse | null>(null);
+const detail = ref<DeviceDetailResponse | null>(initialDetail);
+const analysis = ref<DeviceAnalysisResponse | null>(initialAnalysis);
 
 const currentDevice = computed(() => detail.value?.device ?? null);
 const recentActivities = computed(() => detail.value?.recentActivities ?? []);
 const latestStatus = computed(() => detail.value?.latestStatus ?? null);
 
-async function loadData() {
-  loading.value = true;
+async function loadData(force = false) {
+  loading.value = !detail.value || !analysis.value;
 
   try {
     const [deviceDetail, deviceAnalysis] = await Promise.all([
-      fetchDeviceDetail(deviceId.value),
-      fetchDeviceAnalysis(deviceId.value, DEFAULT_ANALYSIS_RANGE)
+      fetchDeviceDetail(deviceId.value, force),
+      fetchDeviceAnalysis(deviceId.value, DEFAULT_ANALYSIS_RANGE, force)
     ]);
     detail.value = deviceDetail;
     analysis.value = deviceAnalysis;
@@ -51,8 +53,19 @@ async function loadData() {
   }
 }
 
-onMounted(loadData);
-watch([deviceId, () => props.refreshToken], loadData);
+onMounted(() => {
+  if (loading.value) {
+    void loadData();
+  }
+});
+watch(deviceId, () => {
+  detail.value = peekDeviceDetail(deviceId.value);
+  analysis.value = peekDeviceAnalysis(deviceId.value, DEFAULT_ANALYSIS_RANGE);
+  void loadData();
+});
+watch(() => props.refreshToken, () => {
+  void loadData(true);
+});
 </script>
 
 <template>
@@ -67,14 +80,14 @@ watch([deviceId, () => props.refreshToken], loadData);
   <section v-else-if="!currentDevice" class="panel">
     <div class="panel-header">
       <h2>设备不存在</h2>
-      <RouterLink class="button-link" to="/">返回汇总</RouterLink>
+      <RouterLink class="button-link" to="/">返回首页</RouterLink>
     </div>
     <p class="muted">当前设备还没有上报活动，或者设备 ID 已变化。</p>
   </section>
 
   <template v-else>
     <section class="page-actions">
-      <RouterLink class="button-link" to="/">返回汇总</RouterLink>
+      <RouterLink class="button-link" to="/">返回首页</RouterLink>
       <RouterLink class="button-link" :to="`/devices/${encodeURIComponent(deviceId)}/analysis?range=${DEFAULT_ANALYSIS_RANGE}`">设备分析页</RouterLink>
       <span class="muted">连接状态：{{ connection }}</span>
     </section>
