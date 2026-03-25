@@ -21,9 +21,8 @@ It does three things:
 
 Now you can view these pages:
 
-- `/` - Device summary page, view current status of all devices
+- `/` - Home / global analysis page, showing device cards, top windows, and browser domain usage
 - `/devices/:deviceId` - Single device detail page, view recent activity switches
-- `/analysis` - Global analysis page, view aggregated window/domain usage time by time range
 - `/devices/:deviceId/analysis` - Single device analysis page, view usage profile of a machine
 
 The analysis page supports these time ranges:
@@ -39,12 +38,32 @@ In one sentence:
 
 **This is not just a "monitoring demo". This is a Rust monolithic project that turns your computer usage trajectory into something you can view, replay, and analyze.**
 
-## 2. How to operate
+## 2. Screenshots
+
+All screenshots are stored in [`image/`](image/):
+
+### Home / Global Analysis
+
+![Home](image/Home.png)
+
+### Device Detail
+
+![Detail](image/Detail.png)
+
+### Device Analysis
+
+![Analyze](image/Analyze.png)
+
+## 3. How to operate
+
+### Usage
+
+Download the release directly. On first run, the desktop collector will generate a JSON config file by default.
 
 All commands below are executed in this directory:
 
 ```bash
-cd /Users/wong/Code/RustLang/am-i-okay/rust-monolith
+cd /Users/wong/Code/RustLang/Eyes_on_me
 ```
 
 ### Start the server
@@ -78,10 +97,9 @@ AGENT_SERVER_API_BASE_URL=http://127.0.0.1:8787 ./_scripts/run-agent.sh
 
 ```text
 http://127.0.0.1:8787/
-http://127.0.0.1:8787/analysis
 ```
 
-You can switch directly in the analysis page:
+You can switch directly on the home page:
 
 - Last 3 hours
 - Last 6 hours
@@ -131,7 +149,7 @@ Current capabilities:
 - Identify foreground app
 - Identify window title
 - In browser scenarios, try to infer domain from page title
-- Report to server and enter analysis page aggregation
+- Report to server and aggregate into the home page / per-device analysis page
 
 Current limitations:
 
@@ -139,7 +157,7 @@ Current limitations:
 - Pure Wayland native window scenarios need further compatibility improvement
 - When upgrading to new version for the first time, if the directory only has old `amiokay.db`, the server will automatically migrate to new `eyes-on-me.db`
 
-## 3. Technical implementation
+## 4. Technical implementation
 
 ### Server
 
@@ -186,9 +204,8 @@ Main technologies:
 
 Current frontend capabilities:
 
-- Device summary
+- Home / global analysis
 - Single device details
-- Global analysis
 - Single device analysis
 - Time range switching
 - SSE auto-refresh

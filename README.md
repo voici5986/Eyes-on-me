@@ -21,31 +21,46 @@
 
 现在已经能看这些页面：
 
-- `/` - 设备汇总页，看所有设备当前状态
+- `/` - 首页 / 全局分析页，看设备卡片、全局高频窗口、浏览器域名累计
 - `/devices/:deviceId` - 单设备明细页，看最近活动切换
-- `/analysis` - 全局分析页，看按时间范围聚合后的窗口 / 域名使用时长
 - `/devices/:deviceId/analysis` - 单设备分析页，看某台机器的使用画像
 
 分析页已经支持这些时间范围：
 
-- `3h`/6h`/1d`/1w`/1m`/all`
+- `3h` / `6h` / `1d` / `1w` / `1m` / `all`
 
 一句话说完：
 
 **这不是“做个监控 demo”。这是把你的电脑使用轨迹做成一套能看、能回放、能分析的 Rust 单体项目。**
 
-## 2. 怎么操作
+## 2. 页面截图
+
+截图都放在项目根目录的 [`image/`](image/) 里：
+
+### 首页 / 全局分析
+
+![Home](image/Home.png)
+
+### 单设备明细
+
+![Detail](image/Detail.png)
+
+### 单设备分析
+
+![Analyze](image/Analyze.png)
+
+## 3. 怎么操作
 
 ### 使用
 
-直接下载relesase 第一次使用客户端会默认生成一个json文件。
+直接下载 release。第一次运行桌面采集端时，会默认生成一个 JSON 配置文件。
 
 ### 编译
 
 下面所有命令，都在这个目录执行：
 
 ```bash
-cd /Users/wong/Code/RustLang/am-i-okay/rust-monolith
+cd /Users/wong/Code/RustLang/Eyes_on_me
 ```
 
 ### 启动服务端
@@ -79,12 +94,11 @@ AGENT_SERVER_API_BASE_URL=http://127.0.0.1:8787 ./_scripts/run-agent.sh
 
 ```text
 http://127.0.0.1:8787/
-http://127.0.0.1:8787/analysis
 ```
 
-分析页里直接可以切：
+首页里直接可以切：
 
-- 最近 3 小时/6 小时/1 天/1 周/ALL
+- 最近 3 小时 / 6 小时 / 1 天 / 1 周 / 1 月 / 全部
 
 ### 本地开发前端
 
@@ -125,7 +139,7 @@ TARGET_TRIPLE=x86_64-unknown-linux-gnu ./_scripts/package-target.sh
 - 识别前台应用
 - 识别窗口标题
 - 浏览器场景会尽量从页面标题里反推域名
-- 上报到服务端并进入分析页聚合
+- 上报到服务端，并进入首页 / 设备分析页聚合
 
 当前限制：
 
@@ -133,7 +147,7 @@ TARGET_TRIPLE=x86_64-unknown-linux-gnu ./_scripts/package-target.sh
 - 纯 Wayland 原生窗口场景下，兼容性还需要继续补
 - 首次切到新版本时，如果目录里只有旧的 `amiokay.db`，服务端会自动迁到新的 `eyes-on-me.db`
 
-## 3. 技术实现
+## 4. 技术实现
 
 ### 服务端
 
@@ -180,9 +194,8 @@ TARGET_TRIPLE=x86_64-unknown-linux-gnu ./_scripts/package-target.sh
 
 当前前端能力：
 
-- 设备汇总
+- 首页 / 全局分析
 - 单设备明细
-- 全局分析
 - 单设备分析
 - 时间范围切换
 - SSE 自动刷新
@@ -222,4 +235,3 @@ TARGET_TRIPLE=x86_64-unknown-linux-gnu ./_scripts/package-target.sh
 ```
 
 ```
-
