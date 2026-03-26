@@ -241,3 +241,13 @@ The reasons are simple:
 - SSE is light enough and easier to maintain
 
 If we need to do control commands, remote operations, bidirectional communication in the future, we can add WebSocket then.
+
+## 社区
+
+[LINUX DO](https://linux.do/)
+
+## 许可证
+
+GNU
+
+
