@@ -29,6 +29,7 @@ The analysis page supports these time ranges:
 
 - `3h`
 - `6h`
+- `today`
 - `1d`
 - `1w`
 - `1m`
@@ -80,6 +81,7 @@ Default address:
 
 - `http://127.0.0.1:8787`
 - Default database file: `DB/eyes-on-me.db`
+- The server binary embeds the web UI by default, so it does not require an external `web/dist`
 
 ### Start the desktop collector
 
@@ -103,6 +105,7 @@ You can switch directly on the home page:
 
 - Last 3 hours
 - Last 6 hours
+- Today
 - Last 1 day
 - Last 1 week
 - Last 1 month
@@ -111,9 +114,46 @@ You can switch directly on the home page:
 ### Local frontend development
 
 ```bash
-cd web
-pnpm install
-pnpm dev
+./_scripts/run-web-dev.sh
+```
+
+Frontend development URL:
+
+- `http://127.0.0.1:5173`
+
+Vite already proxies `/api` and `/health` to the local server at `http://127.0.0.1:8787`.
+
+If you want to force the server to read a specific external static directory, you can still override it:
+
+```bash
+AMI_OKAY_WEB_DIST=/absolute/path/to/web/dist ./_scripts/run-server.sh
+```
+
+### Local development mode
+
+You no longer need to package the project every time before testing.
+
+Open 3 terminals:
+
+```bash
+# Terminal 1: server
+./_scripts/run-server.sh
+
+# Terminal 2: desktop collector
+./_scripts/run-agent.sh
+
+# Terminal 3: frontend dev server
+./_scripts/run-web-dev.sh
+```
+
+Then open:
+
+- `http://127.0.0.1:5173`
+
+If you only want the startup summary:
+
+```bash
+./_scripts/run-dev.sh
 ```
 
 ### One-click packaging
@@ -125,6 +165,18 @@ pnpm dev
 Default output to:
 
 - `_dist/eyes-on-me-bundle-<host-target>`
+
+Current packaging behavior:
+
+- `client-server` embeds `web/dist` directly during build
+- The bundle no longer copies a separate `web/dist` directory by default
+- Preserves the existing `DB/eyes-on-me.db` inside the bundle by default
+- No longer force-copies the root `DB/eyes-on-me.db` into the bundle by default
+- If you explicitly want to package the root database into the bundle:
+
+```bash
+PACKAGE_COPY_DB=1 ./_scripts/package.sh
+```
 
 To specify platform:
 
@@ -216,16 +268,23 @@ Current frontend capabilities:
 
 Platform implementations:
 
-- macOS: `NSWorkspace`
-- Windows: `SetWinEventHook`
+- macOS: `NSWorkspace` + `System Events` + low-frequency AppleScript fallback for browser page context
+- Windows: real-time switching + periodic sampling
 - Linux: `xprop` polling
 
 Collection process:
 
 1. Read current foreground app and window info
 2. In browser scenarios, supplement page title / URL / domain as much as possible
-3. Send via HTTP POST to server
-4. Server writes to DB, webpage updates automatically
+3. Detect idle / locked state separately so active time is cut off correctly
+4. Send via HTTP POST to server
+5. Server writes to DB, webpage updates automatically
+
+Current collection mode:
+
+- Foreground switches are reported immediately
+- Long stays get sampled every 15 seconds
+- Analysis caps long gaps so sparse historical data does not accidentally become all-day activity
 
 ### Why SSE instead of WebSocket
 
@@ -249,5 +308,3 @@ If we need to do control commands, remote operations, bidirectional communicatio
 ## 许可证
 
 GNU
-
-

@@ -15,6 +15,8 @@ export interface BrowserContext {
   confidence: number;
 }
 
+export type PresenceState = "active" | "idle" | "locked";
+
 export interface ActivityEvent {
   eventId: string;
   ts: string;
@@ -25,6 +27,7 @@ export interface ActivityEvent {
   app: ActivityApp;
   windowTitle?: string | null;
   browser?: BrowserContext | null;
+  presence: PresenceState;
   source: string;
 }
 
@@ -67,7 +70,35 @@ export interface UsageBucket {
   lastSeen: string;
 }
 
-export type AnalysisRange = "3h" | "6h" | "1d" | "1w" | "1m" | "all";
+export interface PageUsageBucket {
+  key: string;
+  label: string;
+  url?: string | null;
+  totalTrackedMs: number;
+  sessions: number;
+  lastSeen: string;
+}
+
+export interface DomainUsageBucket {
+  key: string;
+  label: string;
+  totalTrackedMs: number;
+  sessions: number;
+  lastSeen: string;
+  pages: PageUsageBucket[];
+}
+
+export interface BrowserUsageBucket {
+  key: string;
+  label: string;
+  family: string;
+  totalTrackedMs: number;
+  sessions: number;
+  lastSeen: string;
+  domains: DomainUsageBucket[];
+}
+
+export type AnalysisRange = "3h" | "6h" | "today" | "1d" | "1w" | "1m" | "all";
 
 export interface DeviceAnalysisSummary {
   deviceId: string;
@@ -86,6 +117,7 @@ export interface AnalysisOverviewResponse {
   devices: DeviceAnalysisSummary[];
   topAppUsage: UsageBucket[];
   topDomainUsage: UsageBucket[];
+  topBrowserUsage: BrowserUsageBucket[];
 }
 
 export interface DeviceAnalysisResponse {
@@ -97,6 +129,7 @@ export interface DeviceAnalysisResponse {
   latestStatus: DeviceStatus | null;
   appUsage: UsageBucket[];
   domainUsage: UsageBucket[];
+  browserUsage: BrowserUsageBucket[];
 }
 
 export interface StreamMessage<T = unknown> {

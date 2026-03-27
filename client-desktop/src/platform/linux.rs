@@ -3,12 +3,16 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use amiokay_shared::PresenceState;
 use anyhow::{Result, anyhow, bail};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use crate::browser::{detect_browser_context, page_signature};
+use crate::browser::{BrowserContext, detect_browser_context, page_signature};
 use crate::event::{ActivityEnvelope, AppInfo};
+use crate::idle;
+
+const SAMPLE_INTERVAL: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LastApp {
@@ -22,6 +26,16 @@ struct ForegroundApp {
     window_id: String,
     app: AppInfo,
     window_title: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct LastSentState {
+    marker: LastApp,
+    app: AppInfo,
+    window_title: Option<String>,
+    browser: Option<BrowserContext>,
+    presence: PresenceState,
+    sent_at: Instant,
 }
 
 pub fn run_foreground_watcher(
@@ -38,44 +52,20 @@ pub fn run_foreground_watcher(
 
     info!("foreground watcher started (Linux xprop polling)");
 
-    let mut last_app = None::<LastApp>;
+    let mut last_sent = None::<LastSentState>;
     let mut last_read_error_at = None::<Instant>;
 
     loop {
-        match current_foreground_app() {
+        let presence = if idle::is_idle(idle::DEFAULT_IDLE_TIMEOUT_SECS) {
+            PresenceState::Idle
+        } else {
+            PresenceState::Active
+        };
+
+        let current = match current_foreground_app() {
             Some(current) => {
                 last_read_error_at = None;
-
-                let browser = detect_browser_context(&current.app, current.window_title.as_deref());
-                let marker = LastApp {
-                    window_id: current.window_id.clone(),
-                    pid: current.app.pid,
-                    page_signature: page_signature(browser.as_ref(), current.window_title.as_deref()),
-                };
-
-                if last_app.as_ref() != Some(&marker) {
-                    info!(
-                        app_name = %current.app.name,
-                        app_id = %current.app.id,
-                        pid = current.app.pid,
-                        "foreground app changed"
-                    );
-
-                    let event = ActivityEnvelope::foreground_changed(
-                        &device_id,
-                        &agent_name,
-                        "linux",
-                        "xprop",
-                        current.app.clone(),
-                        current.window_title.clone(),
-                        browser,
-                    );
-                    if let Err(err) = tx.send(event) {
-                        warn!(error = %err, "event channel closed, dropping event");
-                    }
-
-                    last_app = Some(marker);
-                }
+                current
             }
             None => {
                 let now = Instant::now();
@@ -86,10 +76,116 @@ pub fn run_foreground_watcher(
                     warn!("cannot read frontmost app on Linux");
                     last_read_error_at = Some(now);
                 }
+                last_sent
+                    .as_ref()
+                    .map(previous_as_foreground)
+                    .unwrap_or_else(|| synthetic_foreground_app(presence))
             }
+        };
+
+        let browser = stabilize_browser_context(
+            detect_browser_context(&current.app, current.window_title.as_deref()),
+            last_sent.as_ref(),
+            &current.app,
+            current.window_title.as_deref(),
+        );
+        let marker = LastApp {
+            window_id: current.window_id.clone(),
+            pid: current.app.pid,
+            page_signature: page_signature(browser.as_ref(), current.window_title.as_deref()),
+        };
+
+        let now = Instant::now();
+        let marker_changed = last_sent
+            .as_ref()
+            .map(|state| state.marker != marker)
+            .unwrap_or(true);
+        let presence_changed = last_sent
+            .as_ref()
+            .map(|state| state.presence != presence)
+            .unwrap_or(true);
+        let sample_due = last_sent
+            .as_ref()
+            .map(|state| now.duration_since(state.sent_at) >= SAMPLE_INTERVAL)
+            .unwrap_or(true);
+
+        if marker_changed || presence_changed || sample_due {
+            let kind = if marker_changed {
+                "foreground_changed"
+            } else if presence_changed {
+                "presence_changed"
+            } else {
+                "activity_sample"
+            };
+
+            info!(
+                app_name = %current.app.name,
+                app_id = %current.app.id,
+                pid = current.app.pid,
+                presence = ?presence,
+                kind,
+                "activity sampled"
+            );
+
+            let event = ActivityEnvelope::activity(
+                &device_id,
+                &agent_name,
+                "linux",
+                "xprop",
+                kind,
+                current.app.clone(),
+                current.window_title.clone(),
+                browser.clone(),
+                presence,
+            );
+            if let Err(err) = tx.send(event) {
+                warn!(error = %err, "event channel closed, dropping event");
+            }
+
+            last_sent = Some(LastSentState {
+                marker,
+                app: current.app,
+                window_title: current.window_title,
+                browser,
+                presence,
+                sent_at: now,
+            });
         }
 
         thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn stabilize_browser_context(
+    browser: Option<BrowserContext>,
+    previous: Option<&LastSentState>,
+    app: &AppInfo,
+    window_title: Option<&str>,
+) -> Option<BrowserContext> {
+    let same_window = previous
+        .map(|state| {
+            state.app.id == app.id
+                && state.window_title.as_deref() == window_title
+                && state.browser.is_some()
+        })
+        .unwrap_or(false);
+
+    match (browser, previous.and_then(|state| state.browser.clone())) {
+        (Some(mut current), Some(prev)) if same_window => {
+            if current.url.is_none() {
+                current.url = prev.url.clone();
+            }
+            if current.domain.is_none() {
+                current.domain = prev.domain.clone();
+            }
+            if current.page_title.is_none() {
+                current.page_title = prev.page_title.clone();
+            }
+            Some(current)
+        }
+        (Some(current), _) => Some(current),
+        (None, Some(prev)) if same_window => Some(prev),
+        (None, _) => None,
     }
 }
 
@@ -113,6 +209,33 @@ fn current_foreground_app() -> Option<ForegroundApp> {
     })
 }
 
+fn previous_as_foreground(previous: &LastSentState) -> ForegroundApp {
+    ForegroundApp {
+        window_id: previous.marker.window_id.clone(),
+        app: previous.app.clone(),
+        window_title: previous.window_title.clone(),
+    }
+}
+
+fn synthetic_foreground_app(presence: PresenceState) -> ForegroundApp {
+    let (id, name) = match presence {
+        PresenceState::Locked => ("system.locked", "Locked Screen"),
+        PresenceState::Idle => ("system.idle", "Idle"),
+        PresenceState::Active => ("system.unknown", "Unknown"),
+    };
+
+    ForegroundApp {
+        window_id: id.to_string(),
+        app: AppInfo {
+            id: id.to_string(),
+            name: name.to_string(),
+            title: Some(name.to_string()),
+            pid: -1,
+        },
+        window_title: None,
+    }
+}
+
 fn active_window_id() -> Option<String> {
     let output = run_command("xprop", &["-root", "_NET_ACTIVE_WINDOW"])?;
     let marker = output.split('#').nth(1)?.trim();
@@ -124,12 +247,7 @@ fn active_window_id() -> Option<String> {
 
 fn window_pid(window_id: &str) -> Option<u32> {
     let output = run_command("xprop", &["-id", window_id, "_NET_WM_PID"])?;
-    output
-        .split('=')
-        .nth(1)?
-        .trim()
-        .parse::<u32>()
-        .ok()
+    output.split('=').nth(1)?.trim().parse::<u32>().ok()
 }
 
 fn window_title(window_id: &str) -> Option<String> {
@@ -191,7 +309,9 @@ fn command_available(name: &str) -> bool {
     Command::new(name)
         .arg("--help")
         .output()
-        .map(|output| output.status.success() || !output.stdout.is_empty() || !output.stderr.is_empty())
+        .map(|output| {
+            output.status.success() || !output.stdout.is_empty() || !output.stderr.is_empty()
+        })
         .unwrap_or(false)
 }
 

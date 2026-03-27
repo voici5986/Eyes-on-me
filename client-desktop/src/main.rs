@@ -11,7 +11,9 @@ use tracing_subscriber::EnvFilter;
 mod browser;
 mod config;
 mod event;
+mod idle;
 mod platform;
+mod screen_lock;
 mod transport;
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]

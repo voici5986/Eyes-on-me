@@ -11,6 +11,6 @@ pub fn api_router(state: Arc<AppState>) -> Router {
     api::router(state)
 }
 
-pub fn static_router(web_dist_dir: PathBuf) -> Router {
+pub fn static_router(web_dist_dir: Option<PathBuf>) -> Router {
     static_files::router(web_dist_dir)
 }

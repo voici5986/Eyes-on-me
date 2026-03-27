@@ -28,7 +28,23 @@ const analysis = ref<DeviceAnalysisResponse | null>(initialAnalysis);
 
 const appUsage = computed(() => analysis.value?.appUsage ?? []);
 const domainUsage = computed(() => analysis.value?.domainUsage ?? []);
-const hasDeviceAnalysis = computed(() => appUsage.value.length > 0 || domainUsage.value.length > 0);
+const browserUsage = computed(() => analysis.value?.browserUsage ?? []);
+const domainPagesByKey = computed(() => {
+  const map = new Map<string, DeviceAnalysisResponse["browserUsage"][number]["domains"][number]["pages"]>();
+
+  for (const browser of browserUsage.value) {
+    for (const domain of browser.domains) {
+      if (!map.has(domain.key)) {
+        map.set(domain.key, domain.pages);
+      }
+    }
+  }
+
+  return map;
+});
+const hasDeviceAnalysis = computed(() =>
+  appUsage.value.length > 0 || domainUsage.value.length > 0 || browserUsage.value.length > 0
+);
 const treemapItems = computed(() => buildDeviceUsageTreemap(analysis.value));
 
 async function loadData(force = false) {
@@ -208,22 +224,94 @@ watch(() => props.refreshToken, () => {
         </div>
 
         <ul class="usage-list">
-          <li v-for="bucket in domainUsage" :key="bucket.key" class="usage-item">
+          <li v-for="bucket in domainUsage" :key="bucket.key" class="usage-item domain-usage-item">
             <div class="usage-copy">
-              <strong>{{ bucket.label }}</strong>
-              <p>{{ bucket.sublabel || "未提供页面标题" }}</p>
+              <details class="browser-tree domain-tree" :open="bucket.totalTrackedMs === domainUsage[0]?.totalTrackedMs">
+                <summary class="browser-tree-summary domain-tree-summary">
+                  <div class="domain-tree-heading">
+                    <strong>{{ bucket.label }}</strong>
+                    <p>{{ bucket.sublabel || "未提供页面标题" }}</p>
+                    <span class="inline-meta">{{ bucket.sessions }} 次访问 · 最近 {{ formatDateTime(bucket.lastSeen) }}</span>
+                  </div>
+                  <div class="domain-tree-stats">
+                    <strong>{{ formatDurationLong(bucket.totalTrackedMs) }}</strong>
+                    <span class="inline-meta">{{ usageShare(analysis.totalTrackedMs, bucket.totalTrackedMs).toFixed(1) }}%</span>
+                  </div>
+                </summary>
+                <div class="browser-tree-pages">
+                  <div
+                    v-for="page in domainPagesByKey.get(bucket.key) ?? []"
+                    :key="page.key"
+                    class="browser-tree-page"
+                  >
+                    <div class="browser-tree-copy">
+                      <strong>{{ page.label }}</strong>
+                      <code v-if="page.url" class="url">{{ page.url }}</code>
+                    </div>
+                    <div class="browser-tree-side">
+                      <strong>{{ formatDurationLong(page.totalTrackedMs) }}</strong>
+                      <span class="inline-meta">{{ page.sessions }} 次访问</span>
+                    </div>
+                  </div>
+                </div>
+              </details>
               <div class="usage-bar">
                 <span :style="{ width: `${usageShare(analysis.totalTrackedMs, bucket.totalTrackedMs)}%` }" />
               </div>
-              <span class="inline-meta">{{ bucket.sessions }} 次访问 · 最近 {{ formatDateTime(bucket.lastSeen) }}</span>
-            </div>
-            <div class="usage-side">
-              <strong>{{ formatDurationLong(bucket.totalTrackedMs) }}</strong>
-              <span class="inline-meta">{{ usageShare(analysis.totalTrackedMs, bucket.totalTrackedMs).toFixed(1) }}%</span>
             </div>
           </li>
         </ul>
       </article>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <h2>浏览器 / 域名 / 页面</h2>
+        <span>{{ browserUsage.length }}</span>
+      </div>
+
+      <ul class="usage-list">
+        <li v-for="browser in browserUsage" :key="browser.key" class="usage-item">
+          <div class="usage-copy">
+            <strong>{{ browser.label }}</strong>
+            <p>{{ browser.family }} · {{ browser.domains.length }} 个域名</p>
+            <div class="usage-bar">
+              <span :style="{ width: `${usageShare(analysis.totalTrackedMs, browser.totalTrackedMs)}%` }" />
+            </div>
+            <span class="inline-meta">{{ browser.sessions }} 次访问 · 最近 {{ formatDateTime(browser.lastSeen) }}</span>
+            <details
+              v-for="domain in browser.domains"
+              :key="domain.key"
+              class="browser-tree"
+            >
+              <summary class="browser-tree-summary">
+                <span>{{ domain.label }}</span>
+                <span>{{ formatDurationLong(domain.totalTrackedMs) }}</span>
+              </summary>
+              <div class="browser-tree-pages">
+                <div
+                  v-for="page in domain.pages"
+                  :key="page.key"
+                  class="browser-tree-page"
+                >
+                  <div class="browser-tree-copy">
+                    <strong>{{ page.label }}</strong>
+                    <code v-if="page.url" class="url">{{ page.url }}</code>
+                  </div>
+                  <div class="browser-tree-side">
+                    <strong>{{ formatDurationLong(page.totalTrackedMs) }}</strong>
+                    <span class="inline-meta">{{ page.sessions }} 次访问</span>
+                  </div>
+                </div>
+              </div>
+            </details>
+          </div>
+          <div class="usage-side">
+            <strong>{{ formatDurationLong(browser.totalTrackedMs) }}</strong>
+            <span class="inline-meta">{{ usageShare(analysis.totalTrackedMs, browser.totalTrackedMs).toFixed(1) }}%</span>
+          </div>
+        </li>
+      </ul>
     </section>
     </template>
   </template>

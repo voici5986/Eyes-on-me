@@ -3,6 +3,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::browser::BrowserContext;
+use amiokay_shared::PresenceState;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ActivityEnvelope {
@@ -25,6 +26,7 @@ pub struct ActivityPayload {
     pub window_title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub browser: Option<BrowserContext>,
+    pub presence: PresenceState,
     pub source: &'static str,
 }
 
@@ -38,14 +40,16 @@ pub struct AppInfo {
 }
 
 impl ActivityEnvelope {
-    pub fn foreground_changed(
+    pub fn activity(
         device_id: &str,
         agent_name: &str,
         platform: &'static str,
         source: &'static str,
+        kind: &'static str,
         mut app: AppInfo,
         window_title: Option<String>,
         browser: Option<BrowserContext>,
+        presence: PresenceState,
     ) -> Self {
         if app.title.is_none() {
             app.title = window_title.clone();
@@ -59,10 +63,11 @@ impl ActivityEnvelope {
                 device_id: device_id.to_string(),
                 agent_name: agent_name.to_string(),
                 platform,
-                kind: "foreground_changed",
+                kind,
                 app,
                 window_title,
                 browser,
+                presence,
                 source,
             },
         }

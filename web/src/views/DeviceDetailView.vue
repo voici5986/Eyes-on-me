@@ -9,6 +9,7 @@ import {
   deriveStatusFromActivity,
   formatDuration,
   formatTime,
+  isFreshActivity,
   recentActivityDurationMs
 } from "../lib/activity";
 import { fetchDeviceAnalysis, fetchDeviceDetail, peekDeviceAnalysis, peekDeviceDetail } from "../api";
@@ -103,7 +104,13 @@ watch(() => props.refreshToken, () => {
           <strong>{{ currentDevice.deviceId }}</strong>
           <p>{{ activityHeadline(currentDevice) }}</p>
           <span>{{ currentDevice.app.name }}</span>
-          <span>已持续 {{ formatDuration(activityDurationMs(currentDevice, props.nowMs)) }}</span>
+          <span>
+            {{
+              isFreshActivity(currentDevice, props.nowMs)
+                ? `最近上报 ${formatDuration(activityDurationMs(currentDevice, props.nowMs))} 前`
+                : "当前状态已过期"
+            }}
+          </span>
           <span>最后更新 {{ formatTime(currentDevice.ts) }}</span>
           <code v-if="activityUrl(currentDevice)" class="url">{{ activityUrl(currentDevice) }}</code>
         </div>
@@ -137,7 +144,13 @@ watch(() => props.refreshToken, () => {
           </div>
           <div class="meta">
             <span>{{ activity.app.name }}</span>
-            <span>{{ index === 0 ? "进行中" : "持续 " + formatDuration(recentActivityDurationMs(recentActivities, activity, index, props.nowMs)) }}</span>
+            <span>
+              {{
+                index === 0
+                  ? (isFreshActivity(activity, props.nowMs) ? "进行中" : "上次上报")
+                  : "持续 " + formatDuration(recentActivityDurationMs(recentActivities, activity, index, props.nowMs))
+              }}
+            </span>
             <span>{{ formatTime(activity.ts) }}</span>
           </div>
         </li>
@@ -147,11 +160,11 @@ watch(() => props.refreshToken, () => {
     <section class="panel">
       <div class="panel-header">
         <h2>分析预览</h2>
-        <span>{{ (analysis?.appUsage.length ?? 0) + (analysis?.domainUsage.length ?? 0) }}</span>
+        <span>{{ (analysis?.appUsage.length ?? 0) + (analysis?.domainUsage.length ?? 0) + (analysis?.browserUsage.length ?? 0) }}</span>
       </div>
       <div class="placeholder-stack">
         <div
-          v-if="(analysis?.appUsage.length ?? 0) === 0 && (analysis?.domainUsage.length ?? 0) === 0"
+          v-if="(analysis?.appUsage.length ?? 0) === 0 && (analysis?.domainUsage.length ?? 0) === 0 && (analysis?.browserUsage.length ?? 0) === 0"
           class="placeholder-card"
         >
           <strong>这个设备还没有统计结果</strong>
@@ -166,6 +179,11 @@ watch(() => props.refreshToken, () => {
           <strong>{{ bucket.label }}</strong>
           <p>{{ bucket.sublabel || "浏览器域名累计时长" }}</p>
           <span class="inline-meta">累计 {{ formatDuration(bucket.totalTrackedMs) }}</span>
+        </div>
+        <div v-for="browser in analysis?.browserUsage.slice(0, 2) ?? []" :key="browser.key" class="placeholder-card">
+          <strong>{{ browser.label }}</strong>
+          <p>{{ browser.domains[0]?.label || "浏览器层级分析" }}</p>
+          <span class="inline-meta">累计 {{ formatDuration(browser.totalTrackedMs) }}</span>
         </div>
       </div>
     </section>

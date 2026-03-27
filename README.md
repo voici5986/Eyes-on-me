@@ -27,7 +27,7 @@
 
 分析页已经支持这些时间范围：
 
-- `3h` / `6h` / `1d` / `1w` / `1m` / `all`
+- `3h` / `6h` / `today` / `1d` / `1w` / `1m` / `all`
 
 一句话说完：
 
@@ -77,6 +77,7 @@ cd /Users/wong/Code/RustLang/Eyes_on_me
 
 - `http://127.0.0.1:8787`
 - 默认数据库文件：`DB/eyes-on-me.db`
+- 服务端二进制默认内嵌前端页面资源，不依赖外部 `web/dist`
 
 ### 启动桌面采集端
 
@@ -98,14 +99,51 @@ http://127.0.0.1:8787/
 
 首页里直接可以切：
 
-- 最近 3 小时 / 6 小时 / 1 天 / 1 周 / 1 月 / 全部
+- 最近 3 小时 / 6 小时 / 今天 / 1 天 / 1 周 / 1 月 / 全部
 
 ### 本地开发前端
 
 ```bash
-cd web
-pnpm install
-pnpm dev
+./_scripts/run-web-dev.sh
+```
+
+前端开发地址：
+
+- `http://127.0.0.1:5173`
+
+Vite 已经把 `/api` 和 `/health` 代理到本地服务端 `http://127.0.0.1:8787`。
+
+如果你想强制让服务端读取某个外部静态目录，也可以手动指定：
+
+```bash
+AMI_OKAY_WEB_DIST=/absolute/path/to/web/dist ./_scripts/run-server.sh
+```
+
+### 本机开发模式
+
+现在不需要每次先打包再测。
+
+直接开 3 个终端：
+
+```bash
+# 终端 1：服务端
+./_scripts/run-server.sh
+
+# 终端 2：桌面采集端
+./_scripts/run-agent.sh
+
+# 终端 3：前端开发服务器
+./_scripts/run-web-dev.sh
+```
+
+然后打开：
+
+- `http://127.0.0.1:5173`
+
+如果只想看启动说明：
+
+```bash
+./_scripts/run-dev.sh
 ```
 
 ### 一键打包
@@ -117,6 +155,18 @@ pnpm dev
 默认会输出到：
 
 - `_dist/eyes-on-me-bundle-<host-target>`
+
+当前打包行为：
+
+- `client-server` 在构建时会把 `web/dist` 直接打进服务端二进制
+- bundle 默认不再复制单独的 `web/dist` 目录
+- 默认保留 bundle 目录里已经存在的 `DB/eyes-on-me.db`
+- 默认不再把根目录 `DB/eyes-on-me.db` 强制复制进 bundle
+- 如果你确实想把根目录数据库一起打进 bundle：
+
+```bash
+PACKAGE_COPY_DB=1 ./_scripts/package.sh
+```
 
 如果要指定平台：
 
@@ -206,16 +256,23 @@ TARGET_TRIPLE=x86_64-unknown-linux-gnu ./_scripts/package-target.sh
 
 平台实现：
 
-- macOS: `NSWorkspace`
-- Windows: `SetWinEventHook`
+- macOS: `NSWorkspace` + `System Events` + 低频 AppleScript 补浏览器页面
+- Windows: 事件切换 + 定时补样
 - Linux: `xprop` 轮询
 
 采集流程：
 
 1. 读取当前前台应用和窗口信息
 2. 浏览器场景尽量补齐页面标题 / URL / 域名
-3. 通过 HTTP POST 发给服务端
-4. 服务端写库后，网页自动更新
+3. 空闲 / 锁屏状态单独检测，不再继续累计活跃时长
+4. 通过 HTTP POST 发给服务端
+5. 服务端写库后，网页自动更新
+
+当前采集模式：
+
+- 实时前台切换会立即上报
+- 长时间停留时，每 15 秒会补一个采样点
+- 分析时会对连续时间做上限裁剪，避免旧稀疏数据把整天误算成一段
 
 ### 为什么这里用 SSE，不用 WebSocket
 
@@ -245,4 +302,3 @@ TARGET_TRIPLE=x86_64-unknown-linux-gnu ./_scripts/package-target.sh
 ## 许可证
 
 GNU
-

@@ -7,6 +7,7 @@ LEGACY_BUNDLE_DIR="${LEGACY_BUNDLE_DIR:-$(cd "$ROOT_DIR/.." && pwd)/dist/rust-mo
 TARGET_TRIPLE="${TARGET_TRIPLE:-$(rustc -vV | sed -n 's/^host: //p')}"
 BUNDLE_NAME="${BUNDLE_NAME:-eyes-on-me-bundle-${TARGET_TRIPLE}}"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/_dist/${BUNDLE_NAME}}"
+PACKAGE_COPY_DB="${PACKAGE_COPY_DB:-0}"
 
 SERVER_BIN_NAME="client-server"
 AGENT_BIN_NAME="client-desktop"
@@ -103,14 +104,13 @@ write_windows_script() {
 }
 
 write_runtime_scripts() {
-  if [[ "$TARGET_TRIPLE" == *windows* ]]; then
+if [[ "$TARGET_TRIPLE" == *windows* ]]; then
     write_windows_script "$OUTPUT_DIR/$SERVER_RUN_NAME" "@echo off
 set ROOT_DIR=%~dp0
 cd /d \"%ROOT_DIR%\"
 if not exist \"%ROOT_DIR%DB\" mkdir \"%ROOT_DIR%DB\"
 if \"%AMI_OKAY_HOST%\"==\"\" set AMI_OKAY_HOST=127.0.0.1
 if \"%AMI_OKAY_PORT%\"==\"\" set AMI_OKAY_PORT=8787
-if \"%AMI_OKAY_WEB_DIST%\"==\"\" set AMI_OKAY_WEB_DIST=%ROOT_DIR%web\\dist
 if \"%AMI_OKAY_DATABASE_URL%\"==\"\" set AMI_OKAY_DATABASE_URL=sqlite://DB/eyes-on-me.db
 \"%ROOT_DIR%bin\\$SERVER_BIN_NAME\""
 
@@ -120,7 +120,6 @@ cd /d \"%ROOT_DIR%\"
 if not exist \"%ROOT_DIR%DB\" mkdir \"%ROOT_DIR%DB\"
 if \"%AMI_OKAY_HOST%\"==\"\" set AMI_OKAY_HOST=0.0.0.0
 if \"%AMI_OKAY_PORT%\"==\"\" set AMI_OKAY_PORT=8787
-if \"%AMI_OKAY_WEB_DIST%\"==\"\" set AMI_OKAY_WEB_DIST=%ROOT_DIR%web\\dist
 if \"%AMI_OKAY_DATABASE_URL%\"==\"\" set AMI_OKAY_DATABASE_URL=sqlite://DB/eyes-on-me.db
 \"%ROOT_DIR%bin\\$SERVER_BIN_NAME\""
 
@@ -135,46 +134,60 @@ if \"%AGENT_SERVER_API_BASE_URL%\"==\"\" set AGENT_SERVER_API_BASE_URL=http://12
   write_unix_script "$OUTPUT_DIR/$SERVER_RUN_NAME" "#!/usr/bin/env bash
 set -euo pipefail
 ROOT_DIR=\"\$(cd \"\$(dirname \"\$0\")\" && pwd)\"
+cd \"\$ROOT_DIR\"
 mkdir -p \"\$ROOT_DIR/DB\"
 export AMI_OKAY_HOST=\"\${AMI_OKAY_HOST:-127.0.0.1}\"
 export AMI_OKAY_PORT=\"\${AMI_OKAY_PORT:-8787}\"
-export AMI_OKAY_WEB_DIST=\"\${AMI_OKAY_WEB_DIST:-\$ROOT_DIR/web/dist}\"
 export AMI_OKAY_DATABASE_URL=\"\${AMI_OKAY_DATABASE_URL:-sqlite://\$ROOT_DIR/DB/eyes-on-me.db}\"
 exec \"\$ROOT_DIR/bin/$SERVER_BIN_NAME\""
 
   write_unix_script "$OUTPUT_DIR/$SERVER_PUBLIC_RUN_NAME" "#!/usr/bin/env bash
 set -euo pipefail
 ROOT_DIR=\"\$(cd \"\$(dirname \"\$0\")\" && pwd)\"
+cd \"\$ROOT_DIR\"
 mkdir -p \"\$ROOT_DIR/DB\"
 export AMI_OKAY_HOST=\"\${AMI_OKAY_HOST:-0.0.0.0}\"
 export AMI_OKAY_PORT=\"\${AMI_OKAY_PORT:-8787}\"
-export AMI_OKAY_WEB_DIST=\"\${AMI_OKAY_WEB_DIST:-\$ROOT_DIR/web/dist}\"
 export AMI_OKAY_DATABASE_URL=\"\${AMI_OKAY_DATABASE_URL:-sqlite://\$ROOT_DIR/DB/eyes-on-me.db}\"
 exec \"\$ROOT_DIR/bin/$SERVER_BIN_NAME\""
 
   write_unix_script "$OUTPUT_DIR/$AGENT_RUN_NAME" "#!/usr/bin/env bash
 set -euo pipefail
 ROOT_DIR=\"\$(cd \"\$(dirname \"\$0\")\" && pwd)\"
+cd \"\$ROOT_DIR\"
 export AGENT_SERVER_API_BASE_URL=\"\${AGENT_SERVER_API_BASE_URL:-http://127.0.0.1:8787}\"
+export AGENT_CONFIG_PATH=\"\${AGENT_CONFIG_PATH:-\$ROOT_DIR/client-desktop.config.json}\"
+export AGENT_NO_PROMPT=\"\${AGENT_NO_PROMPT:-1}\"
 exec \"\$ROOT_DIR/bin/$AGENT_BIN_NAME\""
 }
 
 collect_bundle() {
   log "RUN" "collect build artifacts for $TARGET_TRIPLE"
 
+  local preserved_bundle_db=""
+  if [ "$PACKAGE_COPY_DB" != "1" ] && [ -f "$OUTPUT_DIR/DB/eyes-on-me.db" ]; then
+    preserved_bundle_db="$(mktemp "${TMPDIR:-/tmp}/eyes-on-me-db.XXXXXX")"
+    cp "$OUTPUT_DIR/DB/eyes-on-me.db" "$preserved_bundle_db"
+  fi
+
   mkdir -p "$OUTPUT_DIR"
   find "$OUTPUT_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
-  mkdir -p "$OUTPUT_DIR/bin" "$OUTPUT_DIR/web" "$OUTPUT_DIR/DB"
+  mkdir -p "$OUTPUT_DIR/bin" "$OUTPUT_DIR/DB"
 
   cp "$ROOT_DIR/target/$TARGET_TRIPLE/release/$SERVER_BIN_NAME" "$OUTPUT_DIR/bin/$SERVER_BIN_NAME"
   cp "$ROOT_DIR/target/$TARGET_TRIPLE/release/$AGENT_BIN_NAME" "$OUTPUT_DIR/bin/$AGENT_BIN_NAME"
-  cp -R "$ROOT_DIR/web/dist" "$OUTPUT_DIR/web/dist"
   cp "$ROOT_DIR/README.md" "$OUTPUT_DIR/README.md"
 
-  if [ -f "$ROOT_DIR/DB/eyes-on-me.db" ]; then
+  if [ "$PACKAGE_COPY_DB" = "1" ] && [ -f "$ROOT_DIR/DB/eyes-on-me.db" ]; then
     cp "$ROOT_DIR/DB/eyes-on-me.db" "$OUTPUT_DIR/DB/eyes-on-me.db"
-  elif [ -f "$ROOT_DIR/DB/amiokay.db" ]; then
+  elif [ "$PACKAGE_COPY_DB" = "1" ] && [ -f "$ROOT_DIR/DB/amiokay.db" ]; then
     cp "$ROOT_DIR/DB/amiokay.db" "$OUTPUT_DIR/DB/eyes-on-me.db"
+  elif [ -n "$preserved_bundle_db" ] && [ -f "$preserved_bundle_db" ]; then
+    cp "$preserved_bundle_db" "$OUTPUT_DIR/DB/eyes-on-me.db"
+  fi
+
+  if [ -n "$preserved_bundle_db" ] && [ -f "$preserved_bundle_db" ]; then
+    rm -f "$preserved_bundle_db"
   fi
 
   if [ -f "$ROOT_DIR/client-desktop.config.json" ]; then

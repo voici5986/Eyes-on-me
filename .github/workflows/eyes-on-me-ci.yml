@@ -72,9 +72,9 @@ jobs:
         working-directory: web
         run: pnpm install --frozen-lockfile
 
-      - name: Check Rust workspace
-        run: cargo check --workspace --all-targets --locked
-
       - name: Build web
         working-directory: web
         run: pnpm build
+
+      - name: Check Rust workspace
+        run: cargo check --workspace --all-targets --locked

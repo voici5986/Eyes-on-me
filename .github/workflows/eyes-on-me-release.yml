@@ -84,6 +84,16 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install web dependencies
+        working-directory: web
+        shell: bash
+        run: pnpm install --frozen-lockfile
+
+      - name: Build web
+        working-directory: web
+        shell: bash
+        run: pnpm build
+
       - name: Build server
         env:
           TARGET_TRIPLE: ${{ matrix.target }}

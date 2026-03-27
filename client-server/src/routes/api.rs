@@ -21,7 +21,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/devices", get(get_devices))
         .route("/api/devices/{device_id}", get(get_device_detail))
         .route("/api/analysis", get(get_analysis_overview))
-        .route("/api/devices/{device_id}/analysis", get(get_device_analysis))
+        .route(
+            "/api/devices/{device_id}/analysis",
+            get(get_device_analysis),
+        )
         .route("/api/stream", get(stream))
         .route("/api/agent/activity", post(post_activity))
         .route("/api/agent/status", post(post_status))
@@ -58,21 +61,19 @@ async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "ok": true }))
 }
 
-async fn get_current(State(state): State<Arc<AppState>>) -> Json<amiokay_shared::DashboardSnapshot> {
+async fn get_current(
+    State(state): State<Arc<AppState>>,
+) -> Json<amiokay_shared::DashboardSnapshot> {
     Json(state.snapshot())
 }
 
 async fn get_devices(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<amiokay_shared::DevicesResponse>, StatusCode> {
-    state
-        .devices_response()
-        .await
-        .map(Json)
-        .map_err(|err| {
-            error!(error = %err, "failed to load devices response");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })
+    state.devices_response().await.map(Json).map_err(|err| {
+        error!(error = %err, "failed to load devices response");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
 }
 
 async fn get_device_detail(
@@ -159,9 +160,10 @@ async fn stream(
 ) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
     let initial_state = state.clone();
     let initial = futures_util::stream::once(async move {
-        Ok(Event::default().event("message").json_data(StreamMessage::Snapshot(
-            initial_state.snapshot(),
-        )).expect("serialize stream snapshot"))
+        Ok(Event::default()
+            .event("message")
+            .json_data(StreamMessage::Snapshot(initial_state.snapshot()))
+            .expect("serialize stream snapshot"))
     });
 
     let updates = BroadcastStream::new(state.subscribe())

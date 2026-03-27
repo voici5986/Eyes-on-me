@@ -6,8 +6,17 @@ use time::OffsetDateTime;
 pub enum Platform {
     Macos,
     Windows,
+    Linux,
     Android,
     Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PresenceState {
+    Active,
+    Idle,
+    Locked,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +44,8 @@ pub struct BrowserContext {
 #[serde(rename_all = "snake_case")]
 pub enum ActivityKind {
     ForegroundChanged,
+    ActivitySample,
+    PresenceChanged,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,6 +61,7 @@ pub struct ActivityEvent {
     pub app: ActivityApp,
     pub window_title: Option<String>,
     pub browser: Option<BrowserContext>,
+    pub presence: PresenceState,
     pub source: String,
 }
 
@@ -108,6 +120,43 @@ pub struct UsageBucket {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PageUsageBucket {
+    pub key: String,
+    pub label: String,
+    pub url: Option<String>,
+    pub total_tracked_ms: u64,
+    pub sessions: u32,
+    #[serde(with = "time::serde::rfc3339")]
+    pub last_seen: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DomainUsageBucket {
+    pub key: String,
+    pub label: String,
+    pub total_tracked_ms: u64,
+    pub sessions: u32,
+    #[serde(with = "time::serde::rfc3339")]
+    pub last_seen: OffsetDateTime,
+    pub pages: Vec<PageUsageBucket>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserUsageBucket {
+    pub key: String,
+    pub label: String,
+    pub family: String,
+    pub total_tracked_ms: u64,
+    pub sessions: u32,
+    #[serde(with = "time::serde::rfc3339")]
+    pub last_seen: OffsetDateTime,
+    pub domains: Vec<DomainUsageBucket>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DeviceAnalysisSummary {
     pub device_id: String,
     pub platform: Platform,
@@ -129,6 +178,7 @@ pub struct AnalysisOverviewResponse {
     pub devices: Vec<DeviceAnalysisSummary>,
     pub top_app_usage: Vec<UsageBucket>,
     pub top_domain_usage: Vec<UsageBucket>,
+    pub top_browser_usage: Vec<BrowserUsageBucket>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,6 +193,7 @@ pub struct DeviceAnalysisResponse {
     pub latest_status: Option<DeviceStatus>,
     pub app_usage: Vec<UsageBucket>,
     pub domain_usage: Vec<UsageBucket>,
+    pub browser_usage: Vec<BrowserUsageBucket>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,6 +232,7 @@ impl DashboardSnapshot {
                 source: "demo".to_string(),
                 confidence: 0.9,
             }),
+            presence: PresenceState::Active,
             source: "demo".to_string(),
         };
 

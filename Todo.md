@@ -3,6 +3,8 @@
 ## 当前优先级
 
 - [ ] 继续提高桌面活动采集的准确性
+- [ ] macOS 采集链逐步去 AppleScript 化，优先用原生 API / Accessibility 替代前台应用和窗口标题采集
+- [ ] 保留 AppleScript 仅作为浏览器 URL 读取的 fallback，避免高频 spawn `osascript`
 - [ ] 继续提高 Windows 和 Linux 下浏览器上下文识别质量
 - [ ] 继续打磨当前三页结构
 - [ ] 首页 `/`

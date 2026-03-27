@@ -360,6 +360,10 @@ h1 {
   text-align: right;
 }
 
+.usage-side-compact {
+  min-width: 12px;
+}
+
 .usage-bar {
   width: 100%;
   height: 8px;
@@ -374,6 +378,105 @@ h1 {
   height: 100%;
   border-radius: inherit;
   background: linear-gradient(90deg, #f0b36d 0%, #ffdf9b 100%);
+}
+
+.browser-tree {
+  margin-top: 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.browser-tree-summary {
+  display: flex;
+  cursor: pointer;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  color: rgba(246, 244, 238, 0.88);
+  list-style: none;
+}
+
+.browser-tree-summary::-webkit-details-marker {
+  display: none;
+}
+
+.domain-usage-item {
+  display: block;
+}
+
+.domain-tree {
+  margin-top: 0;
+}
+
+.domain-tree-summary {
+  align-items: flex-start;
+}
+
+.domain-tree-heading {
+  min-width: 0;
+  flex: 1;
+}
+
+.domain-tree-heading strong {
+  display: block;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.domain-tree-heading p {
+  margin: 6px 0 0;
+}
+
+.domain-tree-stats {
+  display: flex;
+  min-width: 88px;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.browser-tree-pages {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 14px 14px;
+}
+
+.browser-tree-page {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.browser-tree-page:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.browser-tree-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.browser-tree-copy strong {
+  display: block;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.browser-tree-side {
+  display: flex;
+  min-width: 120px;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  text-align: right;
 }
 
 .list-item p,
@@ -452,7 +555,23 @@ h1 {
   }
 
   .list-item,
-  .usage-item {
+  .usage-item,
+  .browser-tree-page {
     flex-direction: column;
+  }
+
+  .browser-tree-side {
+    text-align: left;
+    align-items: flex-start;
+    min-width: 0;
+  }
+
+  .domain-tree-summary {
+    flex-direction: column;
+  }
+
+  .domain-tree-stats {
+    align-items: flex-start;
+    text-align: left;
   }
 }

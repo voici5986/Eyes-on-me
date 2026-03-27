@@ -40,6 +40,10 @@ impl Config {
     pub fn from_prompt() -> Result<Self> {
         let config_path = resolve_config_path();
         let stored_config = load_stored_config(&config_path);
+        let no_prompt = env::var("AGENT_NO_PROMPT")
+            .ok()
+            .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+            .unwrap_or(false);
 
         #[cfg(target_os = "windows")]
         {
@@ -55,10 +59,29 @@ impl Config {
             });
 
             return Ok(Self {
-                server_api_base_url: normalize_server_api_base_url(stored_config.server_api_base_url)?,
+                server_api_base_url: normalize_server_api_base_url(
+                    stored_config.server_api_base_url,
+                )?,
                 device_id: stored_config.device_id,
                 agent_name: stored_config.agent_name,
                 api_token: stored_config.api_token,
+            });
+        }
+
+        if no_prompt {
+            let config = stored_config.unwrap_or_else(|| StoredConfig {
+                server_api_base_url: default_server_api_base_url(),
+                device_id: default_device_id(),
+                agent_name: default_agent_name(),
+                api_token: default_agent_api_token(),
+            });
+
+            save_stored_config(&config_path, &config);
+            return Ok(Self {
+                server_api_base_url: normalize_server_api_base_url(config.server_api_base_url)?,
+                device_id: config.device_id,
+                agent_name: config.agent_name,
+                api_token: config.api_token,
             });
         }
 
@@ -167,12 +190,16 @@ fn validate_server_api_base_url(url: String) -> Result<String> {
     }
 
     if parsed.query().is_some() || parsed.fragment().is_some() {
-        return Err(anyhow!("agent backend base url must not include query or fragment"));
+        return Err(anyhow!(
+            "agent backend base url must not include query or fragment"
+        ));
     }
 
     let normalized_path = parsed.path().trim_end_matches('/');
     if normalized_path == "/api" {
-        return Err(anyhow!("agent backend must point to service root, not /api"));
+        return Err(anyhow!(
+            "agent backend must point to service root, not /api"
+        ));
     }
 
     if normalized_path.is_empty() || normalized_path == "/" {
@@ -184,22 +211,24 @@ fn validate_server_api_base_url(url: String) -> Result<String> {
 }
 
 fn resolve_config_path() -> PathBuf {
-    #[cfg(target_os = "windows")]
-    {
-        let executable_dir_path = executable_dir_config_path();
-        if executable_dir_path.is_file() {
-            return executable_dir_path;
+    if let Ok(path) = env::var("AGENT_CONFIG_PATH") {
+        let candidate = PathBuf::from(path);
+        if candidate.is_file() {
+            return candidate;
         }
+    }
 
-        let current_dir_path = current_dir_config_path();
-        if current_dir_path.is_file() {
-            return current_dir_path;
-        }
-
+    let executable_dir_path = executable_dir_config_path();
+    if executable_dir_path.is_file() {
         return executable_dir_path;
     }
 
-    current_dir_config_path()
+    let current_dir_path = current_dir_config_path();
+    if current_dir_path.is_file() {
+        return current_dir_path;
+    }
+
+    executable_dir_path
 }
 
 fn current_dir_config_path() -> PathBuf {
@@ -208,7 +237,6 @@ fn current_dir_config_path() -> PathBuf {
         .join(CONFIG_FILE_NAME)
 }
 
-#[cfg(target_os = "windows")]
 fn executable_dir_config_path() -> PathBuf {
     env::current_exe()
         .ok()
@@ -268,7 +296,10 @@ fn default_device_id() -> String {
 
 fn prompt_server_api_base_url(default_value: &str) -> io::Result<String> {
     let mut stdout = io::stdout();
-    writeln!(stdout, "Please enter backend address (example: http://127.0.0.1:8787)")?;
+    writeln!(
+        stdout,
+        "Please enter backend address (example: http://127.0.0.1:8787)"
+    )?;
     write!(stdout, "Backend address [{default_value}]: ")?;
     stdout.flush()?;
 

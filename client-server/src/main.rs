@@ -40,7 +40,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!(
         address = %addr,
-        web_dist = %config.web_dist_dir.display(),
+        web_assets = %config.web_assets_mode(),
         database = %config.database_url,
         "server listening"
     );

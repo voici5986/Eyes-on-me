@@ -13,9 +13,7 @@ pub async fn run_transport(
     api_token: String,
     mut rx: mpsc::UnboundedReceiver<ActivityEnvelope>,
 ) -> Result<()> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()?;
+    let client = Client::builder().timeout(Duration::from_secs(10)).build()?;
 
     let max_retry_delay = Duration::from_secs(30);
     let mut retry_delay = Duration::from_secs(2);
@@ -94,7 +92,9 @@ async fn send_event(
         .unwrap_or_else(|_| "failed to read error response".to_string());
 
     if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-        return Err(anyhow!("server rejected agent token: HTTP {status} {detail}"));
+        return Err(anyhow!(
+            "server rejected agent token: HTTP {status} {detail}"
+        ));
     }
 
     Err(anyhow!("server returned HTTP {status}: {detail}"))

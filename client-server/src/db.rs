@@ -1,9 +1,14 @@
-use std::{fs, path::{Path, PathBuf}, str::FromStr};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 
-use anyhow::Context;
 use amiokay_shared::{
     ActivityApp, ActivityEvent, ActivityKind, DashboardSnapshot, DeviceStatus, Platform,
+    PresenceState,
 };
+use anyhow::Context;
 use sqlx::{
     ConnectOptions, Row, SqlitePool,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
@@ -64,8 +69,9 @@ fn migrate_legacy_database_file(target_path: &str) -> anyhow::Result<()> {
 pub async fn load_snapshot(pool: &SqlitePool) -> anyhow::Result<DashboardSnapshot> {
     let recent_rows = sqlx::query(
         r#"
-        SELECT event_id, ts, device_id, agent_name, platform, kind, app_json, window_title, browser_json, source
+        SELECT event_id, ts, device_id, agent_name, platform, kind, app_json, window_title, browser_json, presence, source
         FROM activity_log
+        WHERE kind != 'activity_sample'
         ORDER BY ts DESC
         LIMIT 20
         "#,
@@ -80,7 +86,7 @@ pub async fn load_snapshot(pool: &SqlitePool) -> anyhow::Result<DashboardSnapsho
 
     let device_rows = sqlx::query(
         r#"
-        SELECT event_id, ts, device_id, agent_name, platform, kind, app_json, window_title, browser_json, source
+        SELECT event_id, ts, device_id, agent_name, platform, kind, app_json, window_title, browser_json, presence, source
         FROM (
             SELECT *,
                    ROW_NUMBER() OVER (PARTITION BY device_id ORDER BY ts DESC) AS row_num
@@ -122,8 +128,8 @@ pub async fn persist_activity(pool: &SqlitePool, event: &ActivityEvent) -> anyho
     sqlx::query(
         r#"
         INSERT INTO activity_log (
-            event_id, ts, device_id, agent_name, platform, kind, app_json, window_title, browser_json, source
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            event_id, ts, device_id, agent_name, platform, kind, app_json, window_title, browser_json, presence, source
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
         ON CONFLICT(event_id) DO UPDATE SET
             ts = excluded.ts,
             device_id = excluded.device_id,
@@ -133,6 +139,7 @@ pub async fn persist_activity(pool: &SqlitePool, event: &ActivityEvent) -> anyho
             app_json = excluded.app_json,
             window_title = excluded.window_title,
             browser_json = excluded.browser_json,
+            presence = excluded.presence,
             source = excluded.source
         "#,
     )
@@ -145,6 +152,7 @@ pub async fn persist_activity(pool: &SqlitePool, event: &ActivityEvent) -> anyho
     .bind(serde_json::to_string(&event.app)?)
     .bind(&event.window_title)
     .bind(event.browser.as_ref().map(serde_json::to_string).transpose()?)
+    .bind(presence_to_str(event.presence))
     .bind(&event.source)
     .execute(pool)
     .await?;
@@ -167,7 +175,11 @@ pub async fn persist_status(pool: &SqlitePool, status: &DeviceStatus) -> anyhow:
         "#,
     )
     .bind(&status.device_id)
-    .bind(status.ts.format(&time::format_description::well_known::Rfc3339)?)
+    .bind(
+        status
+            .ts
+            .format(&time::format_description::well_known::Rfc3339)?,
+    )
     .bind(&status.agent_name)
     .bind(platform_to_str(&status.platform))
     .bind(&status.status_text)
@@ -217,7 +229,7 @@ pub async fn load_latest_activity_for_device(
 ) -> anyhow::Result<Option<ActivityEvent>> {
     sqlx::query(
         r#"
-        SELECT event_id, ts, device_id, agent_name, platform, kind, app_json, window_title, browser_json, source
+        SELECT event_id, ts, device_id, agent_name, platform, kind, app_json, window_title, browser_json, presence, source
         FROM activity_log
         WHERE device_id = ?1
         ORDER BY ts DESC
@@ -238,9 +250,10 @@ pub async fn load_recent_activities_for_device(
 ) -> anyhow::Result<Vec<ActivityEvent>> {
     let rows = sqlx::query(
         r#"
-        SELECT event_id, ts, device_id, agent_name, platform, kind, app_json, window_title, browser_json, source
+        SELECT event_id, ts, device_id, agent_name, platform, kind, app_json, window_title, browser_json, presence, source
         FROM activity_log
         WHERE device_id = ?1
+          AND kind != 'activity_sample'
         ORDER BY ts DESC
         LIMIT ?2
         "#,
@@ -259,7 +272,7 @@ pub async fn load_all_activities_for_device(
 ) -> anyhow::Result<Vec<ActivityEvent>> {
     let rows = sqlx::query(
         r#"
-        SELECT event_id, ts, device_id, agent_name, platform, kind, app_json, window_title, browser_json, source
+        SELECT event_id, ts, device_id, agent_name, platform, kind, app_json, window_title, browser_json, presence, source
         FROM activity_log
         WHERE device_id = ?1
         ORDER BY ts ASC
@@ -285,12 +298,22 @@ async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
             app_json TEXT NOT NULL,
             window_title TEXT,
             browser_json TEXT,
+            presence TEXT NOT NULL DEFAULT 'active',
             source TEXT NOT NULL
         )
         "#,
     )
     .execute(pool)
     .await?;
+
+    sqlx::query(
+        r#"
+        ALTER TABLE activity_log ADD COLUMN presence TEXT NOT NULL DEFAULT 'active'
+        "#,
+    )
+    .execute(pool)
+    .await
+    .ok();
 
     sqlx::query(
         r#"
@@ -333,6 +356,7 @@ fn activity_from_row(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<ActivityEv
         app: serde_json::from_str::<ActivityApp>(&row.try_get::<String, _>("app_json")?)?,
         window_title: row.try_get("window_title")?,
         browser: parse_optional_json(row.try_get::<Option<String>, _>("browser_json")?)?,
+        presence: presence_from_str(&row.try_get::<String, _>("presence")?),
         source: row.try_get("source")?,
     })
 }
@@ -355,6 +379,7 @@ fn platform_to_str(platform: &Platform) -> &'static str {
     match platform {
         Platform::Macos => "macos",
         Platform::Windows => "windows",
+        Platform::Linux => "linux",
         Platform::Android => "android",
         Platform::Unknown => "unknown",
     }
@@ -364,6 +389,7 @@ fn platform_from_str(value: &str) -> Platform {
     match value {
         "macos" => Platform::Macos,
         "windows" => Platform::Windows,
+        "linux" => Platform::Linux,
         "android" => Platform::Android,
         _ => Platform::Unknown,
     }
@@ -372,13 +398,33 @@ fn platform_from_str(value: &str) -> Platform {
 fn kind_to_str(kind: &ActivityKind) -> &'static str {
     match kind {
         ActivityKind::ForegroundChanged => "foreground_changed",
+        ActivityKind::ActivitySample => "activity_sample",
+        ActivityKind::PresenceChanged => "presence_changed",
     }
 }
 
 fn kind_from_str(value: &str) -> ActivityKind {
     match value {
         "foreground_changed" => ActivityKind::ForegroundChanged,
+        "activity_sample" => ActivityKind::ActivitySample,
+        "presence_changed" => ActivityKind::PresenceChanged,
         _ => ActivityKind::ForegroundChanged,
+    }
+}
+
+fn presence_to_str(value: PresenceState) -> &'static str {
+    match value {
+        PresenceState::Active => "active",
+        PresenceState::Idle => "idle",
+        PresenceState::Locked => "locked",
+    }
+}
+
+fn presence_from_str(value: &str) -> PresenceState {
+    match value {
+        "idle" => PresenceState::Idle,
+        "locked" => PresenceState::Locked,
+        _ => PresenceState::Active,
     }
 }
 

@@ -1,4 +1,15 @@
-import type { ActivityEvent, DashboardSnapshot, DeviceStatus } from "../types";
+import type { ActivityEvent, DashboardSnapshot, DeviceStatus, PresenceState } from "../types";
+
+function presenceLabel(presence: PresenceState): string | null {
+  switch (presence) {
+    case "locked":
+      return "屏幕已锁定";
+    case "idle":
+      return "当前空闲中";
+    default:
+      return null;
+  }
+}
 
 export function formatTime(value: string | undefined | null): string {
   if (!value) {
@@ -26,10 +37,23 @@ export function formatDateTime(value: string | undefined | null): string {
 }
 
 export function activityHeadline(activity: ActivityEvent): string {
+  const label = presenceLabel(activity.presence);
+  if (label) {
+    return label;
+  }
+
   return activity.browser?.pageTitle || activity.windowTitle || activity.app.title || activity.app.name;
 }
 
 export function activitySubline(activity: ActivityEvent): string {
+  if (activity.presence === "locked") {
+    return "锁屏或熄屏期间不计入活跃时长";
+  }
+
+  if (activity.presence === "idle") {
+    return "检测到离开设备，已暂停活跃统计";
+  }
+
   return activity.browser?.domain || activity.browser?.url || activity.app.id;
 }
 
@@ -39,6 +63,10 @@ export function activityUrl(activity: ActivityEvent): string | null {
 
 export function activityDurationMs(activity: ActivityEvent, nowMs: number): number {
   return Math.max(0, nowMs - new Date(activity.ts).getTime());
+}
+
+export function isFreshActivity(activity: ActivityEvent, nowMs: number, maxAgeMs = 35_000): boolean {
+  return activityDurationMs(activity, nowMs) <= maxAgeMs;
 }
 
 export function recentActivityDurationMs(
@@ -104,6 +132,11 @@ export function usageShare(totalMs: number, partMs: number): number {
 export function deriveStatusFromActivity(activity: ActivityEvent | null): string {
   if (!activity) {
     return "暂无状态";
+  }
+
+  const label = presenceLabel(activity.presence);
+  if (label) {
+    return label;
   }
 
   if (activity.browser?.domain) {

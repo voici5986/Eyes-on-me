@@ -97,6 +97,15 @@ const BROWSERS: &[BrowserDefinition] = &[
         apple_script_name: Some("Arc"),
     },
     BrowserDefinition {
+        family: "chromium",
+        name: "Zen Browser",
+        bundle_ids: &["app.zen-browser.zen"],
+        processes: &["zen.exe", "zen"],
+        app_names: &["zen browser", "zen"],
+        #[cfg(target_os = "macos")]
+        apple_script_name: None,
+    },
+    BrowserDefinition {
         family: "firefox",
         name: "Firefox",
         bundle_ids: &[
@@ -118,6 +127,42 @@ const BROWSERS: &[BrowserDefinition] = &[
         #[cfg(target_os = "macos")]
         apple_script_name: Some("Safari"),
     },
+    BrowserDefinition {
+        family: "webkit",
+        name: "Orion",
+        bundle_ids: &["com.kagi.kagimacOS"],
+        processes: &["orion.exe", "orion"],
+        app_names: &["orion"],
+        #[cfg(target_os = "macos")]
+        apple_script_name: None,
+    },
+    BrowserDefinition {
+        family: "chromium",
+        name: "QQ Browser",
+        bundle_ids: &[],
+        processes: &["qqbrowser.exe", "qqbrowser"],
+        app_names: &["qq browser", "qqbrowser", "qq浏览器"],
+        #[cfg(target_os = "macos")]
+        apple_script_name: None,
+    },
+    BrowserDefinition {
+        family: "chromium",
+        name: "360 Browser",
+        bundle_ids: &[],
+        processes: &["360se.exe", "360chrome.exe", "360se", "360chrome"],
+        app_names: &["360 browser", "360se", "360chrome", "360浏览器"],
+        #[cfg(target_os = "macos")]
+        apple_script_name: None,
+    },
+    BrowserDefinition {
+        family: "chromium",
+        name: "Sogou Browser",
+        bundle_ids: &[],
+        processes: &["sogouexplorer.exe", "sogouexplorer"],
+        app_names: &["sogou browser", "sogouexplorer", "搜狗浏览器"],
+        #[cfg(target_os = "macos")]
+        apple_script_name: None,
+    },
 ];
 
 pub fn detect_browser_context(app: &AppInfo, window_title: Option<&str>) -> Option<BrowserContext> {
@@ -138,6 +183,14 @@ pub fn detect_browser_context(app: &AppInfo, window_title: Option<&str>) -> Opti
         domain = mac_page.domain;
         source = mac_page.source;
         confidence = mac_page.confidence;
+    }
+
+    if url.is_none() {
+        url = window_title.and_then(infer_url_from_title);
+        if url.is_some() {
+            source = "window-title-url".to_string();
+            confidence = confidence.max(0.74);
+        }
     }
 
     if domain.is_none() {
@@ -250,6 +303,10 @@ fn clean_page_title(value: &str) -> Option<String> {
         return None;
     }
 
+    if normalize_possible_url(trimmed).is_some() {
+        return None;
+    }
+
     Some(trimmed.to_string())
 }
 
@@ -261,58 +318,163 @@ fn url_domain(value: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+fn infer_url_from_title(window_title: &str) -> Option<String> {
+    let title = window_title.trim();
+    if title.is_empty() {
+        return None;
+    }
+
+    if let Some(url) = title
+        .split_whitespace()
+        .next()
+        .and_then(normalize_possible_url)
+    {
+        return Some(url);
+    }
+
+    for separator in [" - ", " — ", " – ", " | ", " · "] {
+        for part in title.rsplit(separator) {
+            if let Some(url) = normalize_possible_url(part) {
+                return Some(url);
+            }
+        }
+    }
+
+    infer_domain_from_text(title).and_then(|domain| normalize_possible_url(&domain))
+}
+
 fn infer_domain_from_text(value: &str) -> Option<String> {
     value
         .split(|ch: char| {
             ch.is_whitespace()
-                || matches!(ch, '|' | '—' | '–' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';')
+                || matches!(
+                    ch,
+                    '|' | '—' | '–' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';'
+                )
         })
         .find_map(domain_from_candidate)
 }
 
 fn domain_from_candidate(candidate: &str) -> Option<String> {
-    let trimmed = candidate.trim_matches(|ch: char| {
-        ch.is_whitespace() || matches!(ch, '"' | '\'' | '`' | '<' | '>' | '。')
-    });
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    if let Some(domain) = url_domain(trimmed) {
-        return Some(domain);
-    }
-
-    let host_like = trimmed
-        .trim_end_matches('/')
-        .split('/')
-        .next()
-        .unwrap_or(trimmed)
-        .trim_end_matches(':')
+    let trimmed = trim_url_candidate(candidate)
+        .trim_matches(|ch: char| ch.is_control() || matches!(ch, '\u{200b}' | '\u{feff}' | '。'))
         .trim_end_matches('.');
-    if host_like.is_empty() || !looks_like_domain(host_like) {
+    if trimmed.is_empty() || trimmed.contains(' ') {
         return None;
     }
 
-    Url::parse(&format!("https://{host_like}"))
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_string))
+    normalize_possible_url(trimmed).and_then(|url| url_domain(&url))
 }
 
-fn looks_like_domain(value: &str) -> bool {
-    if value.eq_ignore_ascii_case("localhost") || value.parse::<std::net::Ipv4Addr>().is_ok() {
-        return true;
+fn normalize_possible_url(value: &str) -> Option<String> {
+    let candidate = trim_url_candidate(value)
+        .trim_matches(|ch: char| ch.is_control() || matches!(ch, '\u{200b}' | '\u{feff}'))
+        .trim_end_matches('.');
+
+    if candidate.is_empty() || candidate.contains(' ') {
+        return None;
     }
 
-    if value.contains("://") || value.contains('@') {
+    let candidate_lower = candidate.to_ascii_lowercase();
+    if candidate_lower.starts_with("http://") || candidate_lower.starts_with("https://") {
+        return Some(candidate.to_string());
+    }
+
+    if candidate.contains("://")
+        || candidate_lower.starts_with("about:")
+        || candidate_lower.starts_with("chrome:")
+        || candidate_lower.starts_with("edge:")
+        || candidate_lower.starts_with("file:")
+    {
+        return Some(candidate.to_string());
+    }
+
+    let (host, _) = split_host_and_rest(candidate);
+    if is_probable_host(host) {
+        let host_without_port = split_host_port(host).0;
+        let scheme = if host_without_port.eq_ignore_ascii_case("localhost")
+            || is_probable_ipv4(host_without_port)
+        {
+            "http://"
+        } else {
+            "https://"
+        };
+        return Some(format!("{}{}", scheme, candidate.trim_end_matches('/')));
+    }
+
+    None
+}
+
+fn trim_url_candidate(value: &str) -> &str {
+    value.trim().trim_matches(|ch: char| {
+        matches!(
+            ch,
+            '"' | '\'' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | ';'
+        )
+    })
+}
+
+fn split_host_and_rest(value: &str) -> (&str, &str) {
+    if let Some(index) = value.find(|ch| ['/', '?', '#'].contains(&ch)) {
+        (&value[..index], &value[index..])
+    } else {
+        (value, "")
+    }
+}
+
+fn split_host_port(value: &str) -> (&str, Option<&str>) {
+    if let Some(index) = value.rfind(':') {
+        let host = &value[..index];
+        let port = &value[index + 1..];
+        if !host.is_empty() && !port.is_empty() && port.chars().all(|ch| ch.is_ascii_digit()) {
+            return (host, Some(port));
+        }
+    }
+
+    (value, None)
+}
+
+fn is_probable_ipv4(value: &str) -> bool {
+    let parts = value.split('.').collect::<Vec<_>>();
+    if parts.len() != 4 {
         return false;
     }
 
+    parts.iter().all(|part| {
+        !part.is_empty()
+            && part.len() <= 3
+            && part.chars().all(|ch| ch.is_ascii_digit())
+            && part.parse::<u8>().is_ok()
+    })
+}
+
+fn is_probable_host(value: &str) -> bool {
+    let host = value.trim().trim_end_matches('.');
+    if host.is_empty() {
+        return false;
+    }
+
+    if host.contains("://") || host.contains('@') {
+        return false;
+    }
+
+    let (host_without_port, _) = split_host_port(host);
+    host_without_port.eq_ignore_ascii_case("localhost")
+        || is_probable_ipv4(host_without_port)
+        || looks_like_domain(host_without_port)
+}
+
+fn looks_like_domain(value: &str) -> bool {
     let parts = value.split('.').collect::<Vec<_>>();
     if parts.len() < 2 || parts.iter().any(|part| part.is_empty()) {
         return false;
     }
 
-    let suffix = parts.last().copied().unwrap_or_default().to_ascii_lowercase();
+    let suffix = parts
+        .last()
+        .copied()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     if matches!(
         suffix.as_str(),
         "rs" | "vue" | "tsx" | "ts" | "js" | "json" | "md" | "txt" | "pdf" | "html" | "css"
