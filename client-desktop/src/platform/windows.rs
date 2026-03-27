@@ -15,7 +15,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
 };
 
-use crate::browser::{BrowserContext, detect_browser_context, page_signature};
+use crate::browser::{BrowserContext, detect_browser_context_for_window, page_signature};
 use crate::event::{ActivityEnvelope, AppInfo};
 use crate::{idle, screen_lock};
 
@@ -33,6 +33,7 @@ struct LastApp {
 struct ForegroundApp {
     app: AppInfo,
     window_title: Option<String>,
+    hwnd: isize,
 }
 
 #[derive(Debug, Clone)]
@@ -72,7 +73,11 @@ fn emit_sample(
         .unwrap_or_else(|| synthetic_foreground_app(presence));
 
     let browser = stabilize_browser_context(
-        detect_browser_context(&current.app, current.window_title.as_deref()),
+        detect_browser_context_for_window(
+            &current.app,
+            current.window_title.as_deref(),
+            current.hwnd,
+        ),
         last_sent.as_ref(),
         &current.app,
         current.window_title.as_deref(),
@@ -181,6 +186,7 @@ fn current_foreground_app() -> Option<ForegroundApp> {
             pid: i32::try_from(pid).unwrap_or(i32::MAX),
         },
         window_title: window_title(hwnd),
+        hwnd: hwnd as isize,
     })
 }
 
@@ -221,6 +227,7 @@ fn previous_as_foreground(previous: &LastSentState) -> ForegroundApp {
     ForegroundApp {
         app: previous.app.clone(),
         window_title: previous.window_title.clone(),
+        hwnd: 0,
     }
 }
 
@@ -239,6 +246,7 @@ fn synthetic_foreground_app(presence: PresenceState) -> ForegroundApp {
             pid: -1,
         },
         window_title: None,
+        hwnd: 0,
     }
 }
 

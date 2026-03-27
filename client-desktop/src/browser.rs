@@ -1,3 +1,12 @@
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+#[cfg(target_os = "windows")]
+use std::process::{Command, Output, Stdio};
+#[cfg(target_os = "windows")]
+use std::thread;
+#[cfg(target_os = "windows")]
+use std::time::{Duration, Instant};
+
 use serde::Serialize;
 use url::Url;
 
@@ -166,6 +175,33 @@ const BROWSERS: &[BrowserDefinition] = &[
 ];
 
 pub fn detect_browser_context(app: &AppInfo, window_title: Option<&str>) -> Option<BrowserContext> {
+    detect_browser_context_internal(app, window_title, None)
+}
+
+#[cfg(target_os = "windows")]
+pub fn detect_browser_context_for_window(
+    app: &AppInfo,
+    window_title: Option<&str>,
+    hwnd: isize,
+) -> Option<BrowserContext> {
+    detect_browser_context_internal(app, window_title, Some(hwnd))
+}
+
+#[cfg(not(target_os = "windows"))]
+#[allow(dead_code)]
+pub fn detect_browser_context_for_window(
+    app: &AppInfo,
+    window_title: Option<&str>,
+    _hwnd: isize,
+) -> Option<BrowserContext> {
+    detect_browser_context_internal(app, window_title, None)
+}
+
+fn detect_browser_context_internal(
+    app: &AppInfo,
+    window_title: Option<&str>,
+    #[allow(unused_variables)] hwnd: Option<isize>,
+) -> Option<BrowserContext> {
     let browser = match_browser(app)?;
 
     let mut title = infer_page_title(window_title, browser);
@@ -183,6 +219,15 @@ pub fn detect_browser_context(app: &AppInfo, window_title: Option<&str>) -> Opti
         domain = mac_page.domain;
         source = mac_page.source;
         confidence = mac_page.confidence;
+    }
+
+    #[cfg(target_os = "windows")]
+    if let Some(win_page) = hwnd.and_then(|handle| read_windows_browser_page(window_title, handle))
+    {
+        url = win_page.url;
+        domain = win_page.domain;
+        source = win_page.source;
+        confidence = win_page.confidence;
     }
 
     if url.is_none() {
@@ -214,6 +259,269 @@ pub fn detect_browser_context(app: &AppInfo, window_title: Option<&str>) -> Opti
         source,
         confidence,
     })
+}
+
+#[cfg(target_os = "windows")]
+const BROWSER_COMMAND_TIMEOUT: Duration = Duration::from_millis(1200);
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone)]
+struct WindowsBrowserPage {
+    url: Option<String>,
+    domain: Option<String>,
+    source: String,
+    confidence: f32,
+}
+
+#[cfg(target_os = "windows")]
+fn read_windows_browser_page(
+    window_title: Option<&str>,
+    hwnd: isize,
+) -> Option<WindowsBrowserPage> {
+    if hwnd == 0 {
+        return None;
+    }
+
+    let native_result = std::panic::catch_unwind(|| get_url_via_uiautomation(hwnd)).unwrap_or(None);
+    if let Some(url) = native_result {
+        return Some(WindowsBrowserPage {
+            domain: url_domain(&url),
+            url: Some(url),
+            source: "uiautomation".to_string(),
+            confidence: 0.96,
+        });
+    }
+
+    if let Some(url) = get_url_via_powershell_uia(hwnd) {
+        return Some(WindowsBrowserPage {
+            domain: url_domain(&url),
+            url: Some(url),
+            source: "powershell-uia".to_string(),
+            confidence: 0.88,
+        });
+    }
+
+    window_title
+        .and_then(infer_url_from_title)
+        .map(|url| WindowsBrowserPage {
+            domain: url_domain(&url),
+            url: Some(url),
+            source: "window-title-url".to_string(),
+            confidence: 0.74,
+        })
+}
+
+#[cfg(target_os = "windows")]
+fn run_browser_command_with_timeout(command: &mut Command) -> Option<Output> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let mut child = command.spawn().ok()?;
+    let started_at = Instant::now();
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output().ok(),
+            Ok(None) if started_at.elapsed() < BROWSER_COMMAND_TIMEOUT => {
+                thread::sleep(Duration::from_millis(50));
+            }
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn get_url_via_powershell_uia(hwnd: isize) -> Option<String> {
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    const POWERSHELL_PATH: &str = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
+
+    let script = format!(
+        r#"
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+
+$hwnd = [IntPtr]::new({hwnd})
+if ($hwnd -eq [IntPtr]::Zero) {{ exit 0 }}
+
+$window = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd)
+if ($null -eq $window) {{ exit 0 }}
+
+$editCondition = New-Object System.Windows.Automation.PropertyCondition(
+    [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+    [System.Windows.Automation.ControlType]::Edit
+)
+$docCondition = New-Object System.Windows.Automation.PropertyCondition(
+    [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+    [System.Windows.Automation.ControlType]::Document
+)
+$allConditions = New-Object System.Windows.Automation.OrCondition($editCondition, $docCondition)
+$nodes = $window.FindAll([System.Windows.Automation.TreeScope]::Descendants, $allConditions)
+
+for ($i = 0; $i -lt $nodes.Count; $i++) {{
+    $node = $nodes.Item($i)
+    $candidates = New-Object System.Collections.Generic.List[string]
+
+    try {{
+        $vp = $node.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
+        if ($vp -ne $null -and $vp.Current.Value) {{ [void]$candidates.Add($vp.Current.Value) }}
+    }} catch {{ }}
+
+    try {{
+        $lp = $node.GetCurrentPattern([System.Windows.Automation.LegacyIAccessiblePattern]::Pattern)
+        if ($lp -ne $null -and $lp.Current.Value) {{ [void]$candidates.Add($lp.Current.Value) }}
+    }} catch {{ }}
+
+    try {{
+        if ($node.Current.Name) {{ [void]$candidates.Add($node.Current.Name) }}
+    }} catch {{ }}
+
+    foreach ($raw in $candidates) {{
+        if ([string]::IsNullOrWhiteSpace($raw)) {{ continue }}
+        $value = $raw.Trim()
+        if ($value -match '^(https?://|chrome://|edge://|about:|file:)' -or
+            $value -match '^(localhost|([a-zA-Z0-9-]+\.)+[a-zA-Z]{{2,}}|\d{{1,3}}(\.\d{{1,3}}){{3}})(:\d{{2,5}})?([/?#].*)?$') {{
+            Write-Output $value
+            exit 0
+        }}
+    }}
+}}
+"#
+    );
+
+    let output = run_browser_command_with_timeout(
+        Command::new(POWERSHELL_PATH)
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Sta",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                &script,
+            ])
+            .creation_flags(CREATE_NO_WINDOW),
+    )?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    normalize_possible_url(&value)
+}
+
+#[cfg(target_os = "windows")]
+fn get_url_via_uiautomation(hwnd: isize) -> Option<String> {
+    use uiautomation::UIAutomation;
+    use uiautomation::patterns::{UILegacyIAccessiblePattern, UIValuePattern};
+    use uiautomation::types::{ControlType, Handle};
+
+    let automation = UIAutomation::new().ok()?;
+    let window_element = automation.element_from_handle(Handle::from(hwnd)).ok()?;
+
+    let mut best_match: Option<(i32, String)> = None;
+
+    let inspect_control = |control: uiautomation::UIElement,
+                           best_match: &mut Option<(i32, String)>| {
+        let control_type = match control.get_control_type() {
+            Ok(control_type) => control_type,
+            Err(_) => return,
+        };
+
+        if control_type != ControlType::Edit && control_type != ControlType::Document {
+            return;
+        }
+
+        let name = control.get_name().unwrap_or_default();
+        let class_name = control.get_classname().unwrap_or_default();
+        let name_lower = name.to_lowercase();
+        let class_lower = class_name.to_lowercase();
+        let address_like = name_lower.contains("address")
+            || name_lower.contains("地址")
+            || name_lower.contains("location")
+            || name_lower.contains("omnibox")
+            || class_lower.contains("omnibox")
+            || class_lower.contains("address");
+
+        let mut candidates = Vec::new();
+        if let Ok(pattern) = control.get_pattern::<UIValuePattern>() {
+            if let Ok(value) = pattern.get_value() {
+                candidates.push(value);
+            }
+        }
+        if let Ok(pattern) = control.get_pattern::<UILegacyIAccessiblePattern>() {
+            if let Ok(value) = pattern.get_value() {
+                candidates.push(value);
+            }
+        }
+        candidates.push(name.clone());
+
+        for raw in candidates {
+            let Some(url) = normalize_possible_url(&raw) else {
+                continue;
+            };
+
+            let mut score = match control_type {
+                ControlType::Edit => 35,
+                ControlType::Document => 15,
+                _ => 0,
+            };
+
+            if address_like {
+                score += 50;
+            }
+            if raw.starts_with("http://") || raw.starts_with("https://") {
+                score += 30;
+            } else if raw == class_name || raw == name {
+                score += 5;
+            }
+
+            if score >= 60
+                && best_match
+                    .as_ref()
+                    .map(|(best_score, _)| score > *best_score)
+                    .unwrap_or(true)
+            {
+                *best_match = Some((score, url));
+            }
+        }
+    };
+
+    if let Ok(edits) = automation
+        .create_matcher()
+        .from(window_element.clone())
+        .control_type(ControlType::Edit)
+        .timeout(300)
+        .find_all()
+    {
+        for edit in edits {
+            inspect_control(edit, &mut best_match);
+        }
+    }
+
+    if let Some((score, url)) = &best_match {
+        if *score >= 85 {
+            return Some(url.clone());
+        }
+    }
+
+    if let Ok(docs) = automation
+        .create_matcher()
+        .from(window_element)
+        .control_type(ControlType::Document)
+        .timeout(300)
+        .find_all()
+    {
+        for doc in docs {
+            inspect_control(doc, &mut best_match);
+        }
+    }
+
+    best_match.map(|(_, url)| url)
 }
 
 pub fn page_signature(
