@@ -114,6 +114,9 @@ export interface AnalysisOverviewResponse {
   generatedAt: string;
   deviceCount: number;
   totalTrackedMs: number;
+  workTrackedMs: number;
+  browserTrackedMs: number;
+  appCount: number;
   devices: DeviceAnalysisSummary[];
   topAppUsage: UsageBucket[];
   topDomainUsage: UsageBucket[];
@@ -124,6 +127,9 @@ export interface DeviceAnalysisResponse {
   deviceId: string;
   generatedAt: string;
   totalTrackedMs: number;
+  workTrackedMs: number;
+  browserTrackedMs: number;
+  appCount: number;
   eventCount: number;
   currentLabel?: string | null;
   latestStatus: DeviceStatus | null;

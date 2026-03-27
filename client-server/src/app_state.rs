@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, RwLock},
 };
 
@@ -17,6 +17,8 @@ const RECENT_ACTIVITY_LIMIT: usize = 20;
 const DEVICE_ACTIVITY_LIMIT: i64 = 50;
 const ANALYSIS_TOP_LIMIT: usize = 12;
 const MAX_ACTIVITY_CONTINUITY: TimeDuration = TimeDuration::seconds(30);
+const WORKDAY_START_HOUR: i64 = 9;
+const WORKDAY_END_HOUR: i64 = 18;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnalysisRange {
@@ -31,7 +33,7 @@ pub enum AnalysisRange {
 
 impl AnalysisRange {
     pub fn from_query(value: Option<&str>) -> Option<Self> {
-        match value.unwrap_or("1d") {
+        match value.unwrap_or("today") {
             "3h" => Some(Self::Last3Hours),
             "6h" => Some(Self::Last6Hours),
             "today" => Some(Self::Today),
@@ -206,6 +208,9 @@ impl AppState {
         let mut domain_usage = HashMap::new();
         let mut browser_usage = HashMap::new();
         let mut total_tracked_ms = 0_u64;
+        let mut work_tracked_ms = 0_u64;
+        let mut browser_tracked_ms = 0_u64;
+        let mut app_keys = HashSet::new();
 
         for current_device in snapshot.devices {
             let activities =
@@ -228,9 +233,12 @@ impl AppState {
             }
 
             total_tracked_ms += analysis.total_tracked_ms;
+            work_tracked_ms += analysis.work_tracked_ms;
+            browser_tracked_ms += analysis.browser_tracked_ms;
             merge_usage_vec(&mut app_usage, &analysis.app_usage);
             merge_usage_vec(&mut domain_usage, &analysis.domain_usage);
             merge_browser_usage_vec(&mut browser_usage, &analysis.browser_usage);
+            app_keys.extend(analysis.app_usage.iter().map(|bucket| bucket.key.clone()));
 
             devices.push(DeviceAnalysisSummary {
                 device_id: current_device.device_id.clone(),
@@ -259,6 +267,9 @@ impl AppState {
             generated_at: now,
             device_count: devices.len(),
             total_tracked_ms,
+            work_tracked_ms,
+            browser_tracked_ms,
+            app_count: app_keys.len(),
             devices,
             top_app_usage: finalize_usage_map(app_usage),
             top_domain_usage: finalize_usage_map(domain_usage),
@@ -362,13 +373,22 @@ fn build_device_analysis_payload(
     let mut domain_usage = HashMap::new();
     let mut browser_usage = HashMap::new();
     let mut total_tracked_ms = 0_u64;
+    let mut work_tracked_ms = 0_u64;
+    let mut browser_tracked_ms = 0_u64;
     let mut event_count = 0_usize;
     let mut current_label = None;
     let window_start = range.window_start(now);
+    let local_offset = UtcOffset::current_local_offset().ok().unwrap_or(UtcOffset::UTC);
+    let mut app_keys = HashSet::new();
 
     for (index, activity) in activities.iter().enumerate() {
         let next_ts = activities.get(index + 1).map(|next| next.ts).unwrap_or(now);
-        let tracked_ms = duration_within_window(activity.ts, next_ts, window_start, now);
+        let Some((effective_start, effective_end)) =
+            effective_segment_bounds(activity.ts, next_ts, window_start, now)
+        else {
+            continue;
+        };
+        let tracked_ms = duration_between(effective_start, effective_end);
         if tracked_ms == 0 {
             continue;
         }
@@ -388,9 +408,14 @@ fn build_device_analysis_payload(
         }
 
         total_tracked_ms += tracked_ms;
+        work_tracked_ms += duration_within_workday(effective_start, effective_end, local_offset);
+        if activity.browser.is_some() {
+            browser_tracked_ms += tracked_ms;
+        }
         accumulate_app_usage(&mut app_usage, activity, tracked_ms);
         accumulate_domain_usage(&mut domain_usage, activity, tracked_ms);
         accumulate_browser_usage(&mut browser_usage, activity, tracked_ms);
+        app_keys.insert(app_usage_key(activity));
     }
 
     if current_label.is_none() {
@@ -401,6 +426,9 @@ fn build_device_analysis_payload(
         device_id,
         generated_at: now,
         total_tracked_ms,
+        work_tracked_ms,
+        browser_tracked_ms,
+        app_count: app_keys.len(),
         event_count,
         current_label,
         latest_status,
@@ -416,6 +444,18 @@ fn duration_within_window(
     window_start: Option<OffsetDateTime>,
     now: OffsetDateTime,
 ) -> u64 {
+    let Some((effective_start, effective_end)) = effective_segment_bounds(start, end, window_start, now) else {
+        return 0;
+    };
+    duration_between(effective_start, effective_end)
+}
+
+fn effective_segment_bounds(
+    start: OffsetDateTime,
+    end: OffsetDateTime,
+    window_start: Option<OffsetDateTime>,
+    now: OffsetDateTime,
+) -> Option<(OffsetDateTime, OffsetDateTime)> {
     let continuity_end = start + MAX_ACTIVITY_CONTINUITY;
     let effective_start = match window_start {
         Some(cutoff) if start < cutoff => cutoff,
@@ -424,14 +464,63 @@ fn duration_within_window(
     let effective_end = if end > now { now } else { end }.min(continuity_end);
 
     if effective_end <= effective_start {
-        return 0;
+        return None;
     }
 
-    (effective_end - effective_start)
+    Some((effective_start, effective_end))
+}
+
+fn duration_between(start: OffsetDateTime, end: OffsetDateTime) -> u64 {
+    (end - start)
         .whole_milliseconds()
         .max(0)
         .try_into()
         .unwrap_or(0)
+}
+
+fn duration_within_workday(
+    start: OffsetDateTime,
+    end: OffsetDateTime,
+    local_offset: UtcOffset,
+) -> u64 {
+    let start_local = start.to_offset(local_offset);
+    let end_local = end.to_offset(local_offset);
+
+    let mut total = overlap_with_workday_for_date(start_local.date(), start_local, end_local);
+    if end_local.date() != start_local.date() {
+        total += overlap_with_workday_for_date(end_local.date(), start_local, end_local);
+    }
+    total
+}
+
+fn overlap_with_workday_for_date(
+    date: time::Date,
+    start_local: OffsetDateTime,
+    end_local: OffsetDateTime,
+) -> u64 {
+    let work_start = date.midnight().assume_offset(start_local.offset()) + TimeDuration::hours(WORKDAY_START_HOUR);
+    let work_end = date.midnight().assume_offset(start_local.offset()) + TimeDuration::hours(WORKDAY_END_HOUR);
+    let effective_start = start_local.max(work_start);
+    let effective_end = end_local.min(work_end);
+
+    if effective_end <= effective_start {
+        return 0;
+    }
+
+    duration_between(effective_start, effective_end)
+}
+
+fn app_usage_key(activity: &ActivityEvent) -> String {
+    if activity.browser.is_some() {
+        format!("app:{}", activity.app.id)
+    } else {
+        let label = activity
+            .window_title
+            .clone()
+            .or_else(|| activity.app.title.clone())
+            .unwrap_or_else(|| activity.app.name.clone());
+        format!("app:{}:{}", activity.app.id, label.to_lowercase())
+    }
 }
 
 fn accumulate_app_usage(
@@ -837,10 +926,7 @@ mod tests {
 
     #[test]
     fn parses_expected_analysis_ranges() {
-        assert_eq!(
-            AnalysisRange::from_query(None),
-            Some(AnalysisRange::LastDay)
-        );
+        assert_eq!(AnalysisRange::from_query(None), Some(AnalysisRange::Today));
         assert_eq!(
             AnalysisRange::from_query(Some("3h")),
             Some(AnalysisRange::Last3Hours)

@@ -162,6 +162,25 @@ watch(() => props.refreshToken, () => {
 
         <div class="stats-row">
           <div class="metric-block">
+            <span class="label">活动总时长</span>
+            <strong>{{ formatDurationLong(analysis.totalTrackedMs) }}</strong>
+          </div>
+          <div class="metric-block">
+            <span class="label">工作时段活跃</span>
+            <strong>{{ formatDurationLong(analysis.workTrackedMs) }}</strong>
+          </div>
+          <div class="metric-block">
+            <span class="label">浏览器时长</span>
+            <strong>{{ formatDurationLong(analysis.browserTrackedMs) }}</strong>
+          </div>
+          <div class="metric-block">
+            <span class="label">应用数</span>
+            <strong>{{ analysis.appCount }}</strong>
+          </div>
+        </div>
+
+        <div class="stats-row secondary">
+          <div class="metric-block">
             <span class="label">累计记录时长</span>
             <strong>{{ formatDurationLong(analysis.totalTrackedMs) }}</strong>
           </div>
@@ -228,14 +247,22 @@ watch(() => props.refreshToken, () => {
             <div class="usage-copy">
               <details class="browser-tree domain-tree" :open="bucket.totalTrackedMs === domainUsage[0]?.totalTrackedMs">
                 <summary class="browser-tree-summary domain-tree-summary">
-                  <div class="domain-tree-heading">
-                    <strong>{{ bucket.label }}</strong>
-                    <p>{{ bucket.sublabel || "未提供页面标题" }}</p>
-                    <span class="inline-meta">{{ bucket.sessions }} 次访问 · 最近 {{ formatDateTime(bucket.lastSeen) }}</span>
-                  </div>
-                  <div class="domain-tree-stats">
-                    <strong>{{ formatDurationLong(bucket.totalTrackedMs) }}</strong>
-                    <span class="inline-meta">{{ usageShare(analysis.totalTrackedMs, bucket.totalTrackedMs).toFixed(1) }}%</span>
+                  <div class="domain-tree-body">
+                    <div class="domain-tree-main">
+                      <div class="domain-tree-heading">
+                        <strong>{{ bucket.label }}</strong>
+                        <p>{{ bucket.sublabel || "未提供页面标题" }}</p>
+                      </div>
+                      <div class="domain-tree-stats">
+                        <strong>{{ formatDurationLong(bucket.totalTrackedMs) }}</strong>
+                        <span class="inline-meta">{{ usageShare(analysis.totalTrackedMs, bucket.totalTrackedMs).toFixed(1) }}%</span>
+                      </div>
+                    </div>
+                    <div class="domain-tree-meta">
+                      <span class="inline-meta">页面 {{ (domainPagesByKey.get(bucket.key) ?? []).length }}</span>
+                      <span class="inline-meta">访问 {{ bucket.sessions }} 次</span>
+                      <span class="inline-meta">最近 {{ formatDateTime(bucket.lastSeen) }}</span>
+                    </div>
                   </div>
                 </summary>
                 <div class="browser-tree-pages">
