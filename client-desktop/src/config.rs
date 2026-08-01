@@ -14,7 +14,7 @@ use uuid::Uuid;
 pub const DESKTOP_AGENT_NAME: &str = "client-desktop";
 const CONFIG_FILE_NAME: &str = "client-desktop.config.json";
 const IDENTITY_FILE_NAME: &str = "client-desktop.identity.json";
-const CURRENT_CONFIG_VERSION: u32 = 2;
+const CURRENT_CONFIG_VERSION: u32 = 4;
 
 #[cfg(target_os = "macos")]
 const DEFAULT_DEVICE_ID: &str = "macos-agent";
@@ -30,21 +30,129 @@ pub struct Config {
     pub agent_name: String,
     pub api_token: String,
     pub capture_filters: CaptureFilters,
+    pub screenshots: ScreenshotConfig,
+    pub spool: SpoolConfig,
+    pub spool_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScreenshotConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_screenshot_cooldown_secs")]
+    pub cooldown_secs: u64,
+    #[serde(default)]
+    pub format: ScreenshotFormat,
+    #[serde(default = "default_screenshot_max_width")]
+    pub max_width: u32,
+    #[serde(default = "default_jpeg_quality")]
+    pub jpeg_quality: u8,
+    #[serde(default)]
+    pub display: ScreenshotDisplay,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenshotFormat {
+    Png,
+    #[default]
+    Jpeg,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenshotDisplay {
+    #[default]
+    Active,
+    Primary,
+    All,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SpoolConfig {
+    #[serde(default = "default_spool_max_bytes")]
+    pub max_bytes: u64,
+}
+
+impl Default for SpoolConfig {
+    fn default() -> Self {
+        Self {
+            max_bytes: default_spool_max_bytes(),
+        }
+    }
+}
+
+impl Default for ScreenshotConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            cooldown_secs: default_screenshot_cooldown_secs(),
+            format: ScreenshotFormat::default(),
+            max_width: default_screenshot_max_width(),
+            jpeg_quality: default_jpeg_quality(),
+            display: ScreenshotDisplay::default(),
+        }
+    }
+}
+
+impl ScreenshotConfig {
+    fn normalize(&mut self) {
+        self.cooldown_secs = self.cooldown_secs.clamp(15, 3_600);
+        self.max_width = self.max_width.clamp(640, 7_680);
+        self.jpeg_quality = self.jpeg_quality.clamp(40, 95);
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PrivacyMode {
+    #[default]
+    Record,
+    Anonymize,
+    Skip,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PrivacyRule {
+    pub pattern: String,
+    #[serde(default)]
+    pub mode: PrivacyMode,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CaptureFilters {
     #[serde(default)]
-    pub ignored_apps: Vec<String>,
+    pub default_mode: PrivacyMode,
     #[serde(default)]
+    pub app_rules: Vec<PrivacyRule>,
+    #[serde(default)]
+    pub domain_rules: Vec<PrivacyRule>,
+    #[serde(default, skip_serializing)]
+    pub ignored_apps: Vec<String>,
+    #[serde(default, skip_serializing)]
     pub ignored_domains: Vec<String>,
 }
 
 impl CaptureFilters {
     fn normalize(&mut self) {
-        self.ignored_apps = normalize_string_list(std::mem::take(&mut self.ignored_apps), false);
-        self.ignored_domains =
-            normalize_string_list(std::mem::take(&mut self.ignored_domains), true);
+        self.app_rules.extend(
+            normalize_string_list(std::mem::take(&mut self.ignored_apps), false)
+                .into_iter()
+                .map(|pattern| PrivacyRule {
+                    pattern,
+                    mode: PrivacyMode::Anonymize,
+                }),
+        );
+        self.domain_rules.extend(
+            normalize_string_list(std::mem::take(&mut self.ignored_domains), true)
+                .into_iter()
+                .map(|pattern| PrivacyRule {
+                    pattern,
+                    mode: PrivacyMode::Anonymize,
+                }),
+        );
+        normalize_privacy_rules(&mut self.app_rules, false);
+        normalize_privacy_rules(&mut self.domain_rules, true);
     }
 }
 
@@ -62,6 +170,10 @@ struct StoredConfig {
     api_token: String,
     #[serde(default)]
     capture_filters: CaptureFilters,
+    #[serde(default)]
+    screenshots: ScreenshotConfig,
+    #[serde(default)]
+    spool: SpoolConfig,
     #[serde(default, skip_serializing)]
     ignored_apps: Vec<String>,
     #[serde(default, skip_serializing)]
@@ -79,6 +191,7 @@ impl Config {
         let config_path = resolve_config_path();
         let identity = ensure_stable_identity(&resolve_identity_path(&config_path))?;
         let stored_config = load_stored_config(&config_path, &identity);
+        let config_fault = config_path.exists() && stored_config.is_none();
         let no_prompt = env::var("AGENT_NO_PROMPT")
             .ok()
             .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
@@ -86,15 +199,30 @@ impl Config {
 
         #[cfg(target_os = "windows")]
         {
-            let stored_config =
-                stored_config.unwrap_or_else(|| StoredConfig::new_default(&identity));
-            save_stored_config(&config_path, &stored_config);
+            let stored_config = stored_config.unwrap_or_else(|| {
+                if config_fault {
+                    StoredConfig::new_fail_safe(&identity)
+                } else {
+                    StoredConfig::new_default(&identity)
+                }
+            });
+            if !config_fault {
+                save_stored_config(&config_path, &stored_config);
+            }
             return stored_config.into_runtime();
         }
 
         if no_prompt {
-            let config = stored_config.unwrap_or_else(|| StoredConfig::new_default(&identity));
-            save_stored_config(&config_path, &config);
+            let config = stored_config.unwrap_or_else(|| {
+                if config_fault {
+                    StoredConfig::new_fail_safe(&identity)
+                } else {
+                    StoredConfig::new_default(&identity)
+                }
+            });
+            if !config_fault {
+                save_stored_config(&config_path, &config);
+            }
             return config.into_runtime();
         }
 
@@ -136,10 +264,20 @@ impl StoredConfig {
             agent_name: default_agent_name(),
             api_token: default_agent_api_token(),
             capture_filters: CaptureFilters::default(),
+            screenshots: ScreenshotConfig::default(),
+            spool: SpoolConfig::default(),
             ignored_apps: Vec::new(),
             ignored_domains: Vec::new(),
         };
         config.normalize(identity);
+        config
+    }
+
+    fn new_fail_safe(identity: &StoredIdentity) -> Self {
+        let mut config = Self::new_default(identity);
+        config.capture_filters.default_mode = PrivacyMode::Skip;
+        config.screenshots.enabled = false;
+        config.server_api_base_url = "http://127.0.0.1:8787".to_string();
         config
     }
 
@@ -155,6 +293,11 @@ impl StoredConfig {
             .ignored_domains
             .append(&mut self.ignored_domains);
         self.capture_filters.normalize();
+        self.screenshots.normalize();
+        self.spool.max_bytes = self
+            .spool
+            .max_bytes
+            .clamp(16 * 1024 * 1024, 64 * 1024 * 1024 * 1024);
 
         self.device_id = self
             .device_id
@@ -167,13 +310,19 @@ impl StoredConfig {
 
     fn into_runtime(mut self) -> Result<Config> {
         let identity = StoredIdentity {
-            device_id: self
-                .device_id
-                .clone()
-                .unwrap_or_else(|| generated_device_id()),
+            device_id: self.device_id.clone().unwrap_or_else(generated_device_id),
             created_at: unix_timestamp_secs(),
         };
         self.normalize(&identity);
+
+        if let Some(enabled) = screenshot_env_override() {
+            self.screenshots.enabled = enabled;
+        }
+        if let Ok(value) = env::var("EYES_ON_ME_SCREENSHOT_COOLDOWN_SECS")
+            && let Ok(seconds) = value.parse::<u64>()
+        {
+            self.screenshots.cooldown_secs = seconds.clamp(15, 3_600);
+        }
 
         Ok(Config {
             server_api_base_url: normalize_server_api_base_url(self.server_api_base_url)?,
@@ -183,6 +332,12 @@ impl StoredConfig {
             agent_name: self.agent_name,
             api_token: self.api_token,
             capture_filters: self.capture_filters,
+            screenshots: self.screenshots,
+            spool: self.spool,
+            spool_dir: config_path_for_runtime()
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("client-desktop.spool"),
         })
     }
 }
@@ -231,6 +386,66 @@ pub fn normalize_server_api_base_url(url: String) -> Result<String> {
 
 fn current_config_version() -> u32 {
     CURRENT_CONFIG_VERSION
+}
+
+fn default_screenshot_cooldown_secs() -> u64 {
+    30
+}
+
+fn default_screenshot_max_width() -> u32 {
+    1920
+}
+fn default_jpeg_quality() -> u8 {
+    78
+}
+fn default_spool_max_bytes() -> u64 {
+    512 * 1024 * 1024
+}
+
+fn config_path_for_runtime() -> PathBuf {
+    resolve_config_path()
+}
+
+fn normalize_privacy_rules(rules: &mut Vec<PrivacyRule>, domains: bool) {
+    let mut seen = HashSet::new();
+    rules.retain_mut(|rule| {
+        rule.pattern = if domains {
+            normalize_domain_rule_for_config(&rule.pattern).unwrap_or_default()
+        } else {
+            rule.pattern.trim().to_string()
+        };
+        !rule.pattern.is_empty() && seen.insert(rule.pattern.to_ascii_lowercase())
+    });
+}
+
+fn normalize_domain_rule_for_config(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Url::parse(trimmed)
+        .ok()
+        .and_then(|url| url.domain().or_else(|| url.host_str()).map(str::to_string))
+        .or_else(|| {
+            let host = trimmed
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .split(['/', '?', '#'])
+                .next()
+                .unwrap_or_default()
+                .trim_matches('.');
+            (!host.is_empty()).then(|| host.to_string())
+        })
+        .map(|value| value.to_ascii_lowercase())
+}
+
+fn screenshot_env_override() -> Option<bool> {
+    env::var("EYES_ON_ME_SCREENSHOTS").ok().map(|value| {
+        matches!(
+            value.trim(),
+            "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
+        )
+    })
 }
 
 fn to_http_base(value: &str) -> String {
@@ -316,25 +531,39 @@ fn executable_dir_config_path() -> PathBuf {
 }
 
 fn load_stored_config(path: &Path, identity: &StoredIdentity) -> Option<StoredConfig> {
-    let raw = match fs::read_to_string(path) {
-        Ok(raw) => raw,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return None,
-        Err(err) => {
-            warn!(path = %path.display(), %err, "failed to read config file");
-            return None;
-        }
-    };
-
-    match serde_json::from_str::<StoredConfig>(&raw) {
-        Ok(mut config) => {
+    match read_config_file(path) {
+        Ok(Some(mut config)) => {
             config.normalize(identity);
+            return Some(config);
+        }
+        Ok(None) => return None,
+        Err(err) => warn!(path = %path.display(), %err, "primary config is invalid"),
+    }
+
+    let backup = config_backup_path(path);
+    match read_config_file(&backup) {
+        Ok(Some(mut config)) => {
+            config.normalize(identity);
+            warn!(path = %path.display(), backup = %backup.display(), "recovered config from backup; corrupt primary was preserved");
             Some(config)
         }
+        Ok(None) => None,
         Err(err) => {
-            warn!(path = %path.display(), %err, "failed to parse config file");
+            error!(path = %backup.display(), %err, "config backup is also invalid; using fail-safe defaults");
             None
         }
     }
+}
+
+fn read_config_file(path: &Path) -> io::Result<Option<StoredConfig>> {
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    serde_json::from_str(&raw)
+        .map(Some)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
 }
 
 fn save_stored_config(path: &Path, config: &StoredConfig) {
@@ -346,9 +575,24 @@ fn save_stored_config(path: &Path, config: &StoredConfig) {
         }
     };
 
-    if let Some(parent) = path.parent() {
-        if let Err(err) = fs::create_dir_all(parent) {
-            error!(path = %path.display(), %err, "failed to create config directory");
+    if let Some(parent) = path.parent()
+        && let Err(err) = fs::create_dir_all(parent)
+    {
+        error!(path = %path.display(), %err, "failed to create config directory");
+        return;
+    }
+
+    match read_config_file(path) {
+        Ok(Some(_)) => {
+            let backup = config_backup_path(path);
+            if let Err(err) = fs::copy(path, &backup).and_then(|_| sync_file(&backup)) {
+                error!(path = %backup.display(), %err, "failed to update config backup");
+                return;
+            }
+        }
+        Ok(None) => {}
+        Err(err) => {
+            error!(path = %path.display(), %err, "refusing to overwrite corrupt config; repair or move it first");
             return;
         }
     }
@@ -359,10 +603,37 @@ fn save_stored_config(path: &Path, config: &StoredConfig) {
 }
 
 fn write_atomic(path: &Path, content: &str) -> io::Result<()> {
-    let temp_path = path.with_extension("tmp");
-    fs::write(&temp_path, content)?;
-    fs::rename(&temp_path, path)?;
+    let temp_path = path.with_extension(format!("tmp-{}", Uuid::new_v4().simple()));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temp_path)?;
+    let result: io::Result<()> = (|| {
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+        fs::rename(&temp_path, path)?;
+        if let Some(parent) = path.parent() {
+            fs::File::open(parent)?.sync_all()?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    result?;
     Ok(())
+}
+
+fn config_backup_path(path: &Path) -> PathBuf {
+    path.with_extension("json.bak")
+}
+
+fn sync_file(path: &Path) -> io::Result<()> {
+    fs::OpenOptions::new().read(true).open(path)?.sync_all()
 }
 
 fn ensure_stable_identity(path: &Path) -> Result<StoredIdentity> {
@@ -587,9 +858,10 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        CaptureFilters, StoredConfig, StoredIdentity, current_config_version, default_agent_name,
-        ensure_stable_identity, load_stored_config, normalize_server_api_base_url,
-        resolve_identity_path, save_stored_config, validate_server_api_base_url,
+        CaptureFilters, ScreenshotConfig, SpoolConfig, StoredConfig, StoredIdentity,
+        current_config_version, default_agent_name, ensure_stable_identity, load_stored_config,
+        normalize_server_api_base_url, resolve_identity_path, save_stored_config,
+        validate_server_api_base_url,
     };
 
     fn temp_dir(label: &str) -> std::path::PathBuf {
@@ -632,6 +904,8 @@ mod tests {
                 agent_name: default_agent_name(),
                 api_token: "token-1".to_string(),
                 capture_filters: CaptureFilters::default(),
+                screenshots: ScreenshotConfig::default(),
+                spool: SpoolConfig::default(),
                 ignored_apps: Vec::new(),
                 ignored_domains: Vec::new(),
             },
@@ -684,8 +958,8 @@ mod tests {
 
         assert_eq!(config.version, current_config_version());
         assert_eq!(config.device_id.as_deref(), Some("legacy-device"));
-        assert_eq!(config.capture_filters.ignored_apps, vec!["WeChat"]);
-        assert_eq!(config.capture_filters.ignored_domains, vec!["github.com"]);
+        assert_eq!(config.capture_filters.app_rules[0].pattern, "WeChat");
+        assert_eq!(config.capture_filters.domain_rules[0].pattern, "github.com");
 
         let _ = fs::remove_dir_all(&dir);
     }

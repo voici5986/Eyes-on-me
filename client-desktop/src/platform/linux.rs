@@ -1,6 +1,10 @@
 use std::env;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -11,7 +15,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::browser::{BrowserContext, detect_browser_context, page_signature};
-use crate::config::CaptureFilters;
+use crate::config::{CaptureFilters, PrivacyMode};
 use crate::event::{ActivityEnvelope, AppInfo};
 use crate::idle;
 use crate::platform::{
@@ -68,6 +72,7 @@ pub fn run_foreground_watcher(
     device_id: String,
     agent_name: String,
     capture_filters: CaptureFilters,
+    recording_enabled: Arc<AtomicBool>,
     tx: mpsc::Sender<ActivityEnvelope>,
 ) -> Result<()> {
     let session = current_linux_desktop_session().ok_or_else(|| {
@@ -101,6 +106,11 @@ pub fn run_foreground_watcher(
     let mut last_read_error_at = None::<Instant>;
 
     loop {
+        if !recording_enabled.load(Ordering::Acquire) {
+            last_sent = None;
+            thread::sleep(POLL_INTERVAL);
+            continue;
+        }
         let presence = if idle::is_idle(idle::DEFAULT_IDLE_TIMEOUT_SECS) {
             PresenceState::Idle
         } else {
@@ -157,6 +167,19 @@ pub fn run_foreground_watcher(
         };
 
         let now = Instant::now();
+        if filtered.mode == PrivacyMode::Skip {
+            last_sent = Some(LastSentState {
+                marker,
+                app: filtered.app,
+                window_title: None,
+                browser: None,
+                presence,
+                sent_at: now,
+                source: current.source,
+            });
+            thread::sleep(POLL_INTERVAL);
+            continue;
+        }
         let marker_changed = last_sent
             .as_ref()
             .map(|state| state.marker != marker)

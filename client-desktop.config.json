@@ -1,6 +1,23 @@
 {
+  "version": 4,
   "server_api_base_url": "http://127.0.0.1:8787",
   "device_id": "wongdeMacBook-Pro.local",
   "agent_name": "client-desktop",
-  "api_token": "dev-agent-token"
+  "api_token": "dev-agent-token",
+  "capture_filters": {
+    "default_mode": "record",
+    "app_rules": [],
+    "domain_rules": []
+  },
+  "screenshots": {
+    "enabled": false,
+    "cooldown_secs": 30,
+    "format": "jpeg",
+    "max_width": 1920,
+    "jpeg_quality": 78,
+    "display": "active"
+  },
+  "spool": {
+    "max_bytes": 536870912
+  }
 }

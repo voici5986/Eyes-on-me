@@ -4,7 +4,6 @@ pub fn is_locked() -> bool {
     use core_foundation::boolean::CFBoolean;
     use core_foundation::dictionary::CFDictionaryRef;
     use core_foundation::string::CFString;
-    use std::process::Command;
 
     #[link(name = "ApplicationServices", kind = "framework")]
     unsafe extern "C" {
@@ -33,31 +32,8 @@ pub fn is_locked() -> bool {
         };
 
         CFRelease(dict as _);
-        if session_locked {
-            return true;
-        }
+        session_locked
     }
-
-    if let Ok(out) = Command::new("pgrep")
-        .args(["-x", "ScreenSaverEngine"])
-        .output()
-    {
-        if out.status.success() {
-            return true;
-        }
-    }
-
-    if let Ok(out) = Command::new("ioreg")
-        .args(["-r", "-c", "IODisplayWrangler", "-d", "1"])
-        .output()
-    {
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        if stdout.contains("\"DevicePowerState\" = 0") {
-            return true;
-        }
-    }
-
-    false
 }
 
 #[cfg(target_os = "windows")]

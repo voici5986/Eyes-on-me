@@ -1,5 +1,5 @@
 use std::{
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::Arc,
 };
 
@@ -46,20 +46,25 @@ async fn serve_request_path(
     request_path: &str,
     is_index_request: bool,
 ) -> axum::response::Response {
-    if let Some(response) = serve_file_from_disk(state, request_path).await {
+    let Some(normalized_path) = normalize_request_path(request_path) else {
+        return not_found_response();
+    };
+
+    if let Some(response) = serve_file_from_disk(state, &normalized_path).await {
         return response;
     }
 
-    if let Some(response) = serve_file_from_embedded(request_path) {
+    if let Some(response) = serve_file_from_embedded(&normalized_path) {
         return response;
     }
 
     if !is_index_request {
-        if let Some(response) = serve_file_from_disk(state, "index.html").await {
+        let index_path = PathBuf::from("index.html");
+        if let Some(response) = serve_file_from_disk(state, &index_path).await {
             return response;
         }
 
-        if let Some(response) = serve_file_from_embedded("index.html") {
+        if let Some(response) = serve_file_from_embedded(&index_path) {
             return response;
         }
     }
@@ -76,7 +81,7 @@ async fn file_exists(path: &PathBuf) -> bool {
 
 async fn serve_file_from_disk(
     state: &StaticState,
-    request_path: &str,
+    request_path: &Path,
 ) -> Option<axum::response::Response> {
     let root = state.web_dist_dir.as_ref()?;
     let candidate = root.join(request_path);
@@ -95,10 +100,9 @@ async fn serve_file_from_disk(
     })
 }
 
-fn serve_file_from_embedded(request_path: &str) -> Option<axum::response::Response> {
-    let normalized = normalize_request_path(request_path);
-    let file = EMBEDDED_WEB_DIST.get_file(normalized.as_path())?;
-    let mime = mime_guess::from_path(Path::new(&normalized)).first_or_octet_stream();
+fn serve_file_from_embedded(request_path: &Path) -> Option<axum::response::Response> {
+    let file = EMBEDDED_WEB_DIST.get_file(request_path)?;
+    let mime = mime_guess::from_path(request_path).first_or_octet_stream();
 
     Some(
         (
@@ -110,13 +114,20 @@ fn serve_file_from_embedded(request_path: &str) -> Option<axum::response::Respon
     )
 }
 
-fn normalize_request_path(request_path: &str) -> PathBuf {
+fn normalize_request_path(request_path: &str) -> Option<PathBuf> {
     let trimmed = request_path.trim_matches('/');
     if trimmed.is_empty() {
-        PathBuf::from("index.html")
-    } else {
-        PathBuf::from(trimmed)
+        return Some(PathBuf::from("index.html"));
     }
+
+    let path = Path::new(trimmed);
+    if path
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return None;
+    }
+    Some(path.to_path_buf())
 }
 
 fn not_found_response() -> axum::response::Response {
@@ -129,4 +140,25 @@ fn not_found_response() -> axum::response::Response {
         Body::from("not found"),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::normalize_request_path;
+
+    #[test]
+    fn rejects_parent_directory_static_paths() {
+        assert_eq!(
+            normalize_request_path("assets/app.js"),
+            Some(PathBuf::from("assets/app.js"))
+        );
+        assert_eq!(
+            normalize_request_path(""),
+            Some(PathBuf::from("index.html"))
+        );
+        assert_eq!(normalize_request_path("../Cargo.toml"), None);
+        assert_eq!(normalize_request_path("assets/../../Cargo.toml"), None);
+    }
 }

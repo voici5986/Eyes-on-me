@@ -21,13 +21,22 @@
 
 现在已经能看这些页面：
 
-- `/` - 首页 / 全局分析页，看设备卡片、全局高频窗口、浏览器域名累计
-- `/devices/:deviceId` - 单设备明细页，看最近活动切换
-- `/devices/:deviceId/analysis` - 单设备分析页，看某台机器的使用画像
+- `/` - 活动概览，看全局时长、24 小时分布、活动分类、应用、域名和设备状态
+- `/devices/:deviceId` - 设备时间线，按任意日期、应用、域名、分类和时间段回放，查看连续工作片段与截图
+- `/devices/:deviceId/analysis` - 设备分析，看小时分布、逐日趋势、应用版图和浏览器站点
+- `/reports` - 活动日报，确定性生成、可选 AI 润色、区块偏好、历史查看、单日/范围导出和自动导出
+- `/assistant` - 工作助手，支持自然语言时间范围、会话历史、流式响应、基础模板和可选 AI 增强
+- `/memory` - 活动记忆，聚合活动、截图 OCR 与日报并进行语义或全文检索
+- `/media` - 采集与媒体，查看 Agent 权限/隐私/积压、媒体容量、OCR 状态并执行删除或清理
+- `/settings` - 回顾设置，配置历史即时生效的应用/域名分类、多段工作时段、日报区块及设置备份/恢复
 
 分析页已经支持这些时间范围：
 
 - `3h` / `6h` / `today` / `1d` / `1w` / `1m` / `all`
+
+统计会区分工作时段、非工作时段、浏览器、空闲和锁屏时间。应用版图一级按应用聚合：Terminal、浏览器等应用即使有多个窗口或 Tab，也只占一个完整块；点击应用后再进入二级抽屉查看每个窗口 / Tab 的累计时长和进入次数。
+
+设备页可以远程暂停/恢复采集；Agent 每 5 秒用一次轻量 HTTP 控制请求同步状态，窗口与 Tab 检测仍由原生系统事件触发，不增加 AppleScript 或高频外部进程。最后一次控制状态会在 Agent 本地持久化，断网和重启后继续遵守。
 
 一句话说完：
 
@@ -75,16 +84,95 @@ cd /Users/wong/Code/RustLang/Eyes_on_me
 
 默认地址：
 
-- 默认监听：`0.0.0.0:8787`
+- 默认监听：`127.0.0.1:8787`，只允许本机访问
 - 本机访问：`http://127.0.0.1:8787`
 - 默认数据库文件：`DB/eyes-on-me.db`
 - 服务端二进制默认内嵌前端页面资源，不依赖外部 `web/dist`
+
+服务端把所有可排序时间统一保存为固定毫秒精度的 UTC；“今天”、逐日统计和工作时段仍按服务端本地时区计算。升级后第一次启动会在 SQLite 事务内把旧的 RFC3339 时区写法规范化，并在 `eyes_on_me_schema_migrations` 留下版本记录。迁移不改变实际时刻；重要数据库升级前仍建议备份 `DB/eyes-on-me.db`。
+
+Agent 上报接口使用 Bearer Token。开发环境默认值是 `dev-agent-token`；局域网或公网部署必须换成随机长 Token，并让服务端和采集端保持一致：
+
+```bash
+# 服务端，公网模式两个 Token 都至少 24 个字符
+EYES_ON_ME_AGENT_API_TOKEN='replace-with-a-long-random-agent-token' \
+EYES_ON_ME_DASHBOARD_TOKEN='replace-with-a-long-random-dashboard-token' \
+./_scripts/run-server-public.sh
+
+# 采集端
+AGENT_API_TOKEN='replace-with-a-long-random-agent-token' \
+AGENT_SERVER_API_BASE_URL='http://server-address:8787' \
+./_scripts/run-agent.sh
+```
+
+`run-server-public.sh` 会明确监听 `0.0.0.0`，并强制校验 Agent Token 和 Dashboard Token。Dashboard 登录成功后使用 `HttpOnly`、`SameSite=Strict` Cookie；HTTPS 部署还应设置 `EYES_ON_ME_SECURE_COOKIE=1`。公网服务仍建议放在 VPN 或 HTTPS 反向代理后面。
 
 ### 启动桌面采集端
 
 ```bash
 ./_scripts/run-agent.sh
 ```
+
+截图默认关闭。明确启用后，Agent 只在活跃状态的前台窗口切换时截图；空闲、锁屏、`anonymize` 和 `skip` 规则都不会产生截图。默认把当前窗口压缩成宽度不超过 1920 的 JPEG：
+
+```bash
+EYES_ON_ME_SCREENSHOTS=1 \
+EYES_ON_ME_SCREENSHOT_COOLDOWN_SECS=30 \
+./_scripts/run-agent.sh
+```
+
+Agent 会先把活动和已绑定的截图原子写入 `client-desktop.spool`，服务端不可达或 Agent 重启后继续发送，两个请求都成功才删除本地条目。默认队列上限 512MB，可在 JSON 的 `spool.max_bytes` 调整。
+
+服务端默认调用 `tesseract` 做受限并发 OCR，原图保存在 `DB/media`，列表使用独立 JPEG 缩略图。相似画面会复用 OCR 结果；失败任务可在 `/media` 重试。默认保留 7 天且总量不超过 2GB：
+
+```bash
+EYES_ON_ME_MEDIA_RETENTION_DAYS=14 \
+EYES_ON_ME_MEDIA_TOTAL_MAX_BYTES=4294967296 \
+EYES_ON_ME_OCR_CONCURRENCY=1 \
+EYES_ON_ME_OCR_LANGUAGE=eng+chi_sim \
+./_scripts/run-server.sh
+```
+
+`EYES_ON_ME_OCR_COMMAND=off` 可关闭 OCR；`EYES_ON_ME_OCR_REDACT_TERMS=token,password` 会在入库和 FTS 前把包含指定词的 OCR 行替换为 `[redacted]`。
+
+AI 日报润色和语义向量都是可选项；不配置时，日报继续使用确定性生成，记忆继续使用 SQLite 全文检索：
+
+```bash
+EYES_ON_ME_AI_BASE_URL='https://api.openai.com/v1' \
+EYES_ON_ME_AI_API_KEY='your-api-key' \
+EYES_ON_ME_AI_MODEL='your-chat-model' \
+EYES_ON_ME_EMBEDDING_MODEL='your-embedding-model' \
+./_scripts/run-server.sh
+```
+
+远程截图镜像是可选项，本地媒体仍是主存储。WebDAV 与 S3/MinIO 都支持失败状态、自动重试和删除同步；公网明文 HTTP 端点会被拒绝：
+
+```bash
+# WebDAV
+EYES_ON_ME_REMOTE_PROVIDER=webdav \
+EYES_ON_ME_WEBDAV_URL='https://dav.example.com/archive' \
+EYES_ON_ME_WEBDAV_USERNAME='user' \
+EYES_ON_ME_WEBDAV_PASSWORD='password' \
+EYES_ON_ME_REMOTE_PREFIX='eyes-on-me' \
+./_scripts/run-server.sh
+
+# S3 / MinIO
+EYES_ON_ME_REMOTE_PROVIDER=s3 \
+EYES_ON_ME_S3_ENDPOINT='https://s3.example.com' \
+EYES_ON_ME_S3_BUCKET='activity-archive' \
+EYES_ON_ME_S3_REGION='us-east-1' \
+EYES_ON_ME_S3_ACCESS_KEY='access-key' \
+EYES_ON_ME_S3_SECRET_KEY='secret-key' \
+./_scripts/run-server.sh
+```
+
+MCP 使用独立 Token，默认关闭。配置后把 `POST http://127.0.0.1:8787/mcp` 作为 HTTP JSON-RPC 端点，并发送 `Authorization: Bearer ...`：
+
+```bash
+EYES_ON_ME_INTEGRATION_TOKEN='replace-with-a-long-random-integration-token' ./_scripts/run-server.sh
+```
+
+工具包括当前上下文、时间线、连续工作片段、语义记忆、日报读取/生成和媒体状态；机器人或自动化程序通过同一 MCP 边界接入，不直接打开 SQLite。
 
 如果要临时改服务端地址：
 
@@ -153,6 +241,15 @@ EYES_ON_ME_WEB_DIST=/absolute/path/to/web/dist ./_scripts/run-server.sh
 ./_scripts/package.sh
 ```
 
+### 完整验收
+
+先统一构建，再运行隔离验收。脚本使用临时 SQLite、临时媒体目录和 `127.0.0.1:18787`，结束后自动清理，不修改正式数据：
+
+```bash
+cargo build --workspace
+./_scripts/test-acceptance.sh
+```
+
 默认会输出到：
 
 - `_dist/eyes-on-me-bundle-<host-target>`
@@ -208,6 +305,12 @@ TARGET_TRIPLE=x86_64-unknown-linux-gnu ./_scripts/package-target.sh
 - 接收 `client-desktop` 上报
 - 写入 SQLite
 - 提供汇总 / 明细 / 分析接口
+- 提供任意范围时间线、分页筛选、连续工作片段、待办线索和事务化批量删除
+- 校验并保存原图/缩略图、相似图 OCR 复用、受限并发 OCR、留存/容量清理和细粒度删除
+- 生成 / 编辑日报，维护可选向量化的活动记忆
+- 管理历史即时生效的分类、多段工作时段、日报区块、会话助手和设置备份
+- 可选镜像截图到 WebDAV 或 S3/MinIO，并提供独立 Token 的 MCP 接口
+- 使用 Dashboard Cookie 保护查询、媒体、SSE、日报和记忆接口
 - 用 SSE 把最新快照推给浏览器
 
 主要技术：
@@ -225,10 +328,39 @@ TARGET_TRIPLE=x86_64-unknown-linux-gnu ./_scripts/package-target.sh
 - `GET /health`
 - `GET /api/current`
 - `GET /api/devices`
+- `GET /api/search/activities?q=...&deviceId=...`
+- `GET /api/timeline?date=...&deviceId=...&app=...&domain=...&category=...&limit=...&offset=...`
+- `GET /api/sessions?date=...&deviceId=...`
+- `POST /api/activities/bulk-delete`
 - `GET /api/devices/:deviceId`
 - `GET /api/analysis?range=...`
 - `GET /api/devices/:deviceId/analysis?range=...`
+- `PUT /api/devices/:deviceId/recording`
 - `GET /api/stream`
+- `POST /api/auth/login`
+- `POST /api/agent/screenshots/:eventId`
+- `GET /api/devices/:deviceId/screenshots`
+- `GET /api/screenshots/:screenshotId/thumbnail`
+- `DELETE /api/screenshots/:screenshotId`
+- `POST /api/screenshots/:screenshotId/ocr`
+- `DELETE /api/activities/:eventId`
+- `GET /api/media/status`
+- `POST /api/media/cleanup`
+- `GET /api/export/activities?format=csv|json`
+- `GET|PUT /api/reports/:date`
+- `GET /api/reports?start=...&end=...`
+- `GET /api/reports/export?start=...&end=...`
+- `POST /api/reports/:date/generate`
+- `GET /api/memory`
+- `POST /api/memory/reindex`
+- `GET|PUT /api/settings/review`
+- `GET /api/settings/review/export`
+- `POST /api/settings/review/import`
+- `GET /api/assistant/conversations`
+- `POST /api/assistant/stream`
+- `GET /api/media/remote`
+- `POST /api/media/remote/retry`
+- `POST /mcp`
 - `POST /api/agent/activity`
 - `POST /api/agent/status`
 
@@ -245,10 +377,16 @@ TARGET_TRIPLE=x86_64-unknown-linux-gnu ./_scripts/package-target.sh
 
 当前前端能力：
 
-- 首页 / 全局分析
-- 单设备明细
-- 单设备分析
-- 时间范围切换
+- 响应式活动概览 / 设备时间线 / 设备分析
+- 24 小时活动分布、分类占比、逐日趋势、应用与域名排行
+- 应用矩形树图，以及窗口 / Tab 二级明细
+- 设备活动全文搜索
+- 任意日期时间线、组合筛选、分页、单条/日期/时间段/应用删除
+- 远程暂停/恢复、连续工作片段和潜在待办
+- 截图缩略图 / 查看器、OCR 搜索/重试、媒体管理和活动删除
+- Dashboard 登录、日报历史/区块偏好/范围导出、活动记忆与流式工作助手
+- 分类、多段工作时段、设置备份/恢复和远程镜像状态
+- 多时间范围切换
 - SSE 自动刷新
 
 ### 桌面采集端
@@ -257,7 +395,7 @@ TARGET_TRIPLE=x86_64-unknown-linux-gnu ./_scripts/package-target.sh
 
 平台实现：
 
-- macOS: `NSWorkspace` + `System Events` + 低频 AppleScript 补浏览器页面
+- macOS: `NSWorkspace` + `AXObserver` + Accessibility/CoreGraphics 原生补扫，运行时不使用 AppleScript
 - Windows: 事件切换 + 定时补样
 - Linux: `xprop` 轮询
 
@@ -266,8 +404,9 @@ TARGET_TRIPLE=x86_64-unknown-linux-gnu ./_scripts/package-target.sh
 1. 读取当前前台应用和窗口信息
 2. 浏览器场景尽量补齐页面标题 / URL / 域名
 3. 空闲 / 锁屏状态单独检测，不再继续累计活跃时长
-4. 通过 HTTP POST 发给服务端
-5. 服务端写库后，网页自动更新
+4. 先执行 `record` / `anonymize` / `skip` 隐私决策
+5. 活动与可选截图先写入磁盘 spool，再通过 HTTP POST 顺序上传
+6. 服务端写库后，网页自动更新
 
 当前采集模式：
 
@@ -292,7 +431,10 @@ TARGET_TRIPLE=x86_64-unknown-linux-gnu ./_scripts/package-target.sh
 
 ## 灵感感谢
 
-[https://github.com/meorionel/am-i-okay]([https://linux.do/](https://github.com/meorionel/am-i-okay))
+- [Work Review](https://github.com/wm94i/Work-Review) - 统计、时间线、日报和个人工作回顾思路
+- [am-i-okay](https://github.com/meorionel/am-i-okay)
+
+`Work Review` 是本地桌面应用。本项目没有复制其 Tauri 本机路径实现，而是完成了适合多设备服务端的字节上传、媒体存储、异步 OCR、日报和活动记忆链路。迁移决策见 [架构与 Work Review 迁移评估](outputs/ARCHITECTURE_AND_WORK_REVIEW_MIGRATION.md) 与 [截图、日报、记忆实现规范](outputs/SCREENSHOT_REPORT_MEMORY_SPEC.md)。
 
 
 

@@ -11,14 +11,14 @@ use std::time::{Duration, Instant};
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
 use std::{env, fs};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
 use serde_json::Value;
 use url::Url;
 
 use crate::event::AppInfo;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowserContext {
     pub family: String,
@@ -40,8 +40,6 @@ struct BrowserDefinition {
     bundle_ids: &'static [&'static str],
     processes: &'static [&'static str],
     app_names: &'static [&'static str],
-    #[cfg(target_os = "macos")]
-    apple_script_name: Option<&'static str>,
 }
 
 const BROWSERS: &[BrowserDefinition] = &[
@@ -55,8 +53,6 @@ const BROWSERS: &[BrowserDefinition] = &[
         ],
         processes: &["chrome.exe", "chrome", "chromium.exe", "chromium"],
         app_names: &["google chrome", "chrome", "chromium"],
-        #[cfg(target_os = "macos")]
-        apple_script_name: Some("Google Chrome"),
     },
     BrowserDefinition {
         family: "chromium",
@@ -64,8 +60,6 @@ const BROWSERS: &[BrowserDefinition] = &[
         bundle_ids: &["com.microsoft.edgemac", "com.microsoft.edge"],
         processes: &["msedge.exe", "msedge"],
         app_names: &["microsoft edge", "edge"],
-        #[cfg(target_os = "macos")]
-        apple_script_name: Some("Microsoft Edge"),
     },
     BrowserDefinition {
         family: "chromium",
@@ -77,8 +71,6 @@ const BROWSERS: &[BrowserDefinition] = &[
         ],
         processes: &["brave.exe", "brave"],
         app_names: &["brave browser", "brave"],
-        #[cfg(target_os = "macos")]
-        apple_script_name: Some("Brave Browser"),
     },
     BrowserDefinition {
         family: "chromium",
@@ -90,8 +82,6 @@ const BROWSERS: &[BrowserDefinition] = &[
         ],
         processes: &["opera.exe", "launcher.exe", "opera", "launcher"],
         app_names: &["opera", "opera gx"],
-        #[cfg(target_os = "macos")]
-        apple_script_name: Some("Opera"),
     },
     BrowserDefinition {
         family: "chromium",
@@ -99,8 +89,6 @@ const BROWSERS: &[BrowserDefinition] = &[
         bundle_ids: &["com.vivaldi.vivaldi"],
         processes: &["vivaldi.exe", "vivaldi"],
         app_names: &["vivaldi"],
-        #[cfg(target_os = "macos")]
-        apple_script_name: Some("Vivaldi"),
     },
     BrowserDefinition {
         family: "chromium",
@@ -108,8 +96,6 @@ const BROWSERS: &[BrowserDefinition] = &[
         bundle_ids: &["company.thebrowser.browser"],
         processes: &["arc.exe", "arc"],
         app_names: &["arc"],
-        #[cfg(target_os = "macos")]
-        apple_script_name: Some("Arc"),
     },
     BrowserDefinition {
         family: "chromium",
@@ -117,8 +103,6 @@ const BROWSERS: &[BrowserDefinition] = &[
         bundle_ids: &["app.zen-browser.zen"],
         processes: &["zen.exe", "zen"],
         app_names: &["zen browser", "zen"],
-        #[cfg(target_os = "macos")]
-        apple_script_name: None,
     },
     BrowserDefinition {
         family: "firefox",
@@ -130,8 +114,6 @@ const BROWSERS: &[BrowserDefinition] = &[
         ],
         processes: &["firefox.exe", "firefox", "waterfox.exe", "waterfox"],
         app_names: &["mozilla firefox", "firefox", "waterfox"],
-        #[cfg(target_os = "macos")]
-        apple_script_name: None,
     },
     BrowserDefinition {
         family: "webkit",
@@ -139,8 +121,6 @@ const BROWSERS: &[BrowserDefinition] = &[
         bundle_ids: &["com.apple.safari"],
         processes: &["safari.exe", "safari"],
         app_names: &["safari"],
-        #[cfg(target_os = "macos")]
-        apple_script_name: Some("Safari"),
     },
     BrowserDefinition {
         family: "webkit",
@@ -148,8 +128,6 @@ const BROWSERS: &[BrowserDefinition] = &[
         bundle_ids: &["com.kagi.kagimacOS"],
         processes: &["orion.exe", "orion"],
         app_names: &["orion"],
-        #[cfg(target_os = "macos")]
-        apple_script_name: None,
     },
     BrowserDefinition {
         family: "chromium",
@@ -157,8 +135,6 @@ const BROWSERS: &[BrowserDefinition] = &[
         bundle_ids: &[],
         processes: &["qqbrowser.exe", "qqbrowser"],
         app_names: &["qq browser", "qqbrowser", "qq浏览器"],
-        #[cfg(target_os = "macos")]
-        apple_script_name: None,
     },
     BrowserDefinition {
         family: "chromium",
@@ -166,8 +142,6 @@ const BROWSERS: &[BrowserDefinition] = &[
         bundle_ids: &[],
         processes: &["360se.exe", "360chrome.exe", "360se", "360chrome"],
         app_names: &["360 browser", "360se", "360chrome", "360浏览器"],
-        #[cfg(target_os = "macos")]
-        apple_script_name: None,
     },
     BrowserDefinition {
         family: "chromium",
@@ -175,13 +149,29 @@ const BROWSERS: &[BrowserDefinition] = &[
         bundle_ids: &[],
         processes: &["sogouexplorer.exe", "sogouexplorer"],
         app_names: &["sogou browser", "sogouexplorer", "搜狗浏览器"],
-        #[cfg(target_os = "macos")]
-        apple_script_name: None,
     },
 ];
 
+#[allow(dead_code)]
 pub fn detect_browser_context(app: &AppInfo, window_title: Option<&str>) -> Option<BrowserContext> {
-    detect_browser_context_internal(app, window_title, None)
+    detect_browser_context_internal(app, window_title, None, None)
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct NativeBrowserPage {
+    pub page_title: Option<String>,
+    pub url: Option<String>,
+    pub source: &'static str,
+    pub confidence: f32,
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn detect_browser_context_for_macos(
+    app: &AppInfo,
+    window_title: Option<&str>,
+    native_page: Option<NativeBrowserPage>,
+) -> Option<BrowserContext> {
+    detect_browser_context_internal(app, window_title, None, native_page)
 }
 
 pub fn is_browser_app(app: &AppInfo) -> bool {
@@ -194,7 +184,7 @@ pub fn detect_browser_context_for_window(
     window_title: Option<&str>,
     hwnd: isize,
 ) -> Option<BrowserContext> {
-    detect_browser_context_internal(app, window_title, Some(hwnd))
+    detect_browser_context_internal(app, window_title, Some(hwnd), None)
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -204,35 +194,34 @@ pub fn detect_browser_context_for_window(
     window_title: Option<&str>,
     _hwnd: isize,
 ) -> Option<BrowserContext> {
-    detect_browser_context_internal(app, window_title, None)
+    detect_browser_context_internal(app, window_title, None, None)
 }
 
 fn detect_browser_context_internal(
     app: &AppInfo,
     window_title: Option<&str>,
     #[allow(unused_variables)] hwnd: Option<isize>,
+    native_page: Option<NativeBrowserPage>,
 ) -> Option<BrowserContext> {
     let browser = match_browser(app)?;
 
     let initial_title = infer_page_title(window_title, browser);
-    #[cfg(target_os = "macos")]
     let mut title = initial_title;
-    #[cfg(not(target_os = "macos"))]
-    let title = initial_title;
     let mut url = None;
     let mut domain = None;
     let mut source = "window-title".to_string();
     let mut confidence: f32 = if title.is_some() { 0.42 } else { 0.18 };
 
-    #[cfg(target_os = "macos")]
-    if let Some(mac_page) = read_macos_browser_page(browser) {
-        if let Some(page_title) = mac_page.page_title {
+    if let Some(native_page) = native_page {
+        if let Some(page_title) = native_page.page_title {
             title = Some(page_title);
         }
-        url = mac_page.url;
-        domain = mac_page.domain;
-        source = mac_page.source;
-        confidence = mac_page.confidence;
+        url = native_page
+            .url
+            .and_then(|value| normalize_possible_url(&value));
+        domain = url.as_deref().and_then(url_domain);
+        source = native_page.source.to_string();
+        confidence = native_page.confidence;
     }
 
     #[cfg(target_os = "windows")]
@@ -245,15 +234,15 @@ fn detect_browser_context_internal(
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    if url.is_none() && browser.family == "firefox" {
-        if let Some(title_ref) = window_title {
-            if let Some(sessionstore_url) = firefox_family_session_store_url(&app.name, title_ref) {
-                domain = url_domain(&sessionstore_url);
-                url = Some(sessionstore_url);
-                source = "firefox-sessionstore".to_string();
-                confidence = confidence.max(0.94);
-            }
-        }
+    if url.is_none()
+        && browser.family == "firefox"
+        && let Some(title_ref) = window_title
+        && let Some(sessionstore_url) = firefox_family_session_store_url(&app.name, title_ref)
+    {
+        domain = url_domain(&sessionstore_url);
+        url = Some(sessionstore_url);
+        source = "firefox-sessionstore".to_string();
+        confidence = confidence.max(0.94);
     }
 
     if url.is_none() {
@@ -554,14 +543,17 @@ pub fn page_signature(
     browser: Option<&BrowserContext>,
     window_title: Option<&str>,
 ) -> Option<String> {
-    let browser = browser?;
+    let url = browser.and_then(|context| context.url.as_deref());
+    let title = browser
+        .and_then(|context| context.page_title.as_deref())
+        .or(window_title);
 
-    browser
-        .url
-        .as_deref()
-        .map(str::to_string)
-        .or_else(|| browser.page_title.as_deref().map(str::to_string))
-        .or_else(|| window_title.map(str::to_string))
+    match (url, title) {
+        (Some(url), Some(title)) => Some(format!("{url}\u{1f}{title}")),
+        (Some(url), None) => Some(url.to_string()),
+        (None, Some(title)) => Some(title.to_string()),
+        (None, None) => None,
+    }
 }
 
 fn match_browser(app: &AppInfo) -> Option<&'static BrowserDefinition> {
@@ -700,7 +692,7 @@ fn domain_from_candidate(candidate: &str) -> Option<String> {
     normalize_possible_url(trimmed).and_then(|url| url_domain(&url))
 }
 
-fn normalize_possible_url(value: &str) -> Option<String> {
+pub(crate) fn normalize_possible_url(value: &str) -> Option<String> {
     let candidate = trim_url_candidate(value)
         .trim_matches(|ch: char| ch.is_control() || matches!(ch, '\u{200b}' | '\u{feff}'))
         .trim_end_matches('.');
@@ -831,84 +823,6 @@ fn process_name(value: &str) -> String {
         .unwrap_or_default()
 }
 
-#[cfg(target_os = "macos")]
-#[derive(Debug, Clone)]
-struct MacBrowserPage {
-    page_title: Option<String>,
-    url: Option<String>,
-    domain: Option<String>,
-    source: String,
-    confidence: f32,
-}
-
-#[cfg(target_os = "macos")]
-fn read_macos_browser_page(browser: &BrowserDefinition) -> Option<MacBrowserPage> {
-    let app_name = browser.apple_script_name?;
-    let script_lines = if browser.family == "webkit" {
-        vec![
-            format!("tell application \"{app_name}\""),
-            "if it is not running then return \"\"".to_string(),
-            "if (count of windows) = 0 then return \"\"".to_string(),
-            "set tabTitle to name of current tab of front window".to_string(),
-            "set tabUrl to URL of current tab of front window".to_string(),
-            "return tabTitle & \"|||AMI|||\" & tabUrl".to_string(),
-            "end tell".to_string(),
-        ]
-    } else {
-        vec![
-            format!("tell application \"{app_name}\""),
-            "if it is not running then return \"\"".to_string(),
-            "if (count of windows) = 0 then return \"\"".to_string(),
-            "set activeTabRef to active tab of front window".to_string(),
-            "set tabTitle to title of activeTabRef".to_string(),
-            "set tabUrl to URL of activeTabRef".to_string(),
-            "return tabTitle & \"|||AMI|||\" & tabUrl".to_string(),
-            "end tell".to_string(),
-        ]
-    };
-
-    let mut command = std::process::Command::new("osascript");
-    for line in script_lines {
-        command.arg("-e").arg(line);
-    }
-
-    let output = command.output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8(output.stdout).ok()?;
-    let trimmed = stdout.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let (page_title, url) = trimmed
-        .split_once("|||AMI|||")
-        .map(|(title, url)| (clean_page_title(title), clean_url(url)))
-        .unwrap_or((clean_page_title(trimmed), None));
-    let domain = url.as_deref().and_then(url_domain);
-    let has_domain = domain.is_some();
-
-    Some(MacBrowserPage {
-        page_title,
-        url,
-        domain,
-        source: "applescript".to_string(),
-        confidence: if has_domain { 0.94 } else { 0.78 },
-    })
-}
-
-#[cfg(target_os = "macos")]
-fn clean_url(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    Url::parse(trimmed).ok().map(|url| url.to_string())
-}
-
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
 fn firefox_family_session_store_url(app_name: &str, window_title: &str) -> Option<String> {
     let app_lower = app_name.to_ascii_lowercase();
@@ -946,7 +860,7 @@ fn firefox_family_session_store_base_dir(app_lower: &str) -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         let app_support_dir = home_dir.join("Library").join("Application Support");
-        return if app_lower.contains("zen") {
+        if app_lower.contains("zen") {
             Some(app_support_dir.join("Zen"))
         } else if app_lower.contains("waterfox") {
             Some(app_support_dir.join("Waterfox"))
@@ -954,12 +868,12 @@ fn firefox_family_session_store_base_dir(app_lower: &str) -> Option<PathBuf> {
             Some(app_support_dir.join("Firefox"))
         } else {
             None
-        };
+        }
     }
 
     #[cfg(target_os = "linux")]
     {
-        return if app_lower.contains("librewolf") {
+        if app_lower.contains("librewolf") {
             Some(home_dir.join(".librewolf"))
         } else if app_lower.contains("waterfox") {
             Some(home_dir.join(".waterfox"))
@@ -969,12 +883,12 @@ fn firefox_family_session_store_base_dir(app_lower: &str) -> Option<PathBuf> {
             Some(home_dir.join(".mozilla").join("firefox"))
         } else {
             None
-        };
+        }
     }
 
     #[cfg(all(test, not(any(target_os = "macos", target_os = "linux"))))]
     {
-        return if app_lower.contains("zen") {
+        if app_lower.contains("zen") {
             Some(
                 home_dir
                     .join("Library")
@@ -997,7 +911,7 @@ fn firefox_family_session_store_base_dir(app_lower: &str) -> Option<PathBuf> {
             )
         } else {
             None
-        };
+        }
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", test)))]
@@ -1343,9 +1257,45 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        decode_mozlz4_bytes, extract_active_tab_url_from_session_store_value,
-        firefox_family_profile_dir_from_ini,
+        BrowserContext, decode_mozlz4_bytes, extract_active_tab_url_from_session_store_value,
+        firefox_family_profile_dir_from_ini, page_signature,
     };
+
+    fn browser_context(url: Option<&str>, page_title: Option<&str>) -> BrowserContext {
+        BrowserContext {
+            family: "chromium".to_string(),
+            name: "Google Chrome".to_string(),
+            page_title: page_title.map(str::to_string),
+            url: url.map(str::to_string),
+            domain: None,
+            source: "test".to_string(),
+            confidence: 1.0,
+        }
+    }
+
+    #[test]
+    fn page_signature_tracks_non_browser_window_tabs() {
+        assert_eq!(
+            page_signature(None, Some("Terminal - build")),
+            Some("Terminal - build".to_string())
+        );
+    }
+
+    #[test]
+    fn page_signature_tracks_browser_title_and_url() {
+        let first = browser_context(Some("https://example.com/work"), Some("Task A"));
+        let second = browser_context(Some("https://example.com/work"), Some("Task B"));
+        let third = browser_context(Some("https://example.com/report"), Some("Task B"));
+
+        assert_ne!(
+            page_signature(Some(&first), None),
+            page_signature(Some(&second), None)
+        );
+        assert_ne!(
+            page_signature(Some(&second), None),
+            page_signature(Some(&third), None)
+        );
+    }
 
     #[test]
     fn decodes_mozlz4_literal_blocks() {

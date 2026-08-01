@@ -1,6 +1,6 @@
-use std::process::Command;
 use std::ptr::NonNull;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -14,17 +14,27 @@ use objc2_foundation::{NSDate, NSDefaultRunLoopMode, NSNotification, NSRunLoop};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use crate::browser::{BrowserContext, detect_browser_context, is_browser_app, page_signature};
-use crate::config::CaptureFilters;
+use crate::browser::{
+    BrowserContext, NativeBrowserPage, detect_browser_context_for_macos, is_browser_app,
+    page_signature,
+};
+use crate::config::{CaptureFilters, PrivacyMode};
 use crate::event::{ActivityEnvelope, AppInfo};
+use crate::platform::macos_native::{
+    AccessibilityEventMonitor, log_accessibility_status, read_window_snapshot,
+    take_accessibility_event,
+};
 use crate::platform::{
     apply_capture_filters, is_system_process, normalize_app_info, send_activity,
 };
 use crate::{idle, screen_lock};
 
-const SAMPLE_INTERVAL: Duration = Duration::from_secs(15);
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+const TAB_FALLBACK_INTERVAL: Duration = Duration::from_secs(5);
+const PRESENCE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+const AX_EVENT_COALESCE_INTERVAL: Duration = Duration::from_millis(500);
+const RUN_LOOP_SLICE_SECS: f64 = 0.2;
 const LOG_THROTTLE_INTERVAL: Duration = Duration::from_secs(30);
-const FRONT_APP_DELIMITER: &str = "|||AMI|||";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LastApp {
@@ -37,6 +47,8 @@ struct LastApp {
 struct ForegroundApp {
     app: AppInfo,
     window_title: Option<String>,
+    native_browser_page: Option<NativeBrowserPage>,
+    source: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -47,47 +59,31 @@ struct LastSentState {
     browser: Option<BrowserContext>,
     presence: PresenceState,
     sent_at: Instant,
+    source: &'static str,
 }
 
 pub fn run_foreground_watcher(
     device_id: String,
     agent_name: String,
     capture_filters: CaptureFilters,
+    recording_enabled: Arc<AtomicBool>,
     tx: mpsc::Sender<ActivityEnvelope>,
 ) -> Result<()> {
-    let last_sent = Arc::new(Mutex::new(None::<LastSentState>));
-    let last_read_error_at = Arc::new(Mutex::new(None::<Instant>));
+    let mut last_sent = None::<LastSentState>;
+    let mut last_read_error_at = None::<Instant>;
+    let mut accessibility_monitor = AccessibilityEventMonitor::new();
+    let workspace_event_pending = Arc::new(AtomicBool::new(true));
+
+    log_accessibility_status();
 
     autoreleasepool(|_| {
         let workspace = NSWorkspace::sharedWorkspace();
         let notification_center = workspace.notificationCenter();
 
-        emit_sample(
-            &device_id,
-            &agent_name,
-            &capture_filters,
-            &tx,
-            &last_sent,
-            &last_read_error_at,
-        );
-
-        let block_device_id = device_id.clone();
-        let block_agent_name = agent_name.clone();
-        let block_capture_filters = capture_filters.clone();
-        let block_tx = tx.clone();
-        let block_last_sent = Arc::clone(&last_sent);
-        let block_last_read_error_at = Arc::clone(&last_read_error_at);
+        let block_pending = Arc::clone(&workspace_event_pending);
         let observer = RcBlock::new(move |_notification: NonNull<NSNotification>| {
-            emit_sample(
-                &block_device_id,
-                &block_agent_name,
-                &block_capture_filters,
-                &block_tx,
-                &block_last_sent,
-                &block_last_read_error_at,
-            );
+            block_pending.store(true, Ordering::Release);
         });
-
         let _observer_token = unsafe {
             notification_center.addObserverForName_object_queue_usingBlock(
                 Some(NSWorkspaceDidActivateApplicationNotification),
@@ -97,86 +93,139 @@ pub fn run_foreground_watcher(
             )
         };
 
-        info!("foreground watcher started (macOS notification + polling sampler)");
+        info!(
+            tab_fallback_secs = TAB_FALLBACK_INTERVAL.as_secs(),
+            heartbeat_secs = HEARTBEAT_INTERVAL.as_secs(),
+            "foreground watcher started (macOS native notifications + low-frequency fallback)"
+        );
 
         let run_loop = NSRunLoop::currentRunLoop();
+        let mut presence = current_presence();
+        let mut next_presence_check = Instant::now();
+        let mut next_fallback = Instant::now();
+        let mut accessibility_event_deferred = false;
+        let mut last_accessibility_sample_at = None::<Instant>;
+        let mut was_recording = recording_enabled.load(Ordering::Acquire);
+
         loop {
-            let until = NSDate::dateWithTimeIntervalSinceNow(1.0);
+            let until = NSDate::dateWithTimeIntervalSinceNow(RUN_LOOP_SLICE_SECS);
             let mode = unsafe { NSDefaultRunLoopMode };
             let _ = run_loop.runMode_beforeDate(mode, &until);
-            emit_sample(
+
+            let is_recording = recording_enabled.load(Ordering::Acquire);
+            if !is_recording {
+                if was_recording {
+                    last_sent = None;
+                    accessibility_monitor.bind(None);
+                }
+                was_recording = false;
+                continue;
+            }
+            if !was_recording {
+                workspace_event_pending.store(true, Ordering::Release);
+            }
+            was_recording = true;
+
+            let now = Instant::now();
+            let workspace_changed = workspace_event_pending.swap(false, Ordering::AcqRel);
+            accessibility_event_deferred |= take_accessibility_event();
+            let accessibility_event_due = accessibility_event_deferred
+                && last_accessibility_sample_at
+                    .map(|sampled_at| now.duration_since(sampled_at) >= AX_EVENT_COALESCE_INTERVAL)
+                    .unwrap_or(true);
+            let mut should_sample = workspace_changed || accessibility_event_due;
+
+            if now >= next_presence_check {
+                let next_presence = current_presence();
+                should_sample |= next_presence != presence;
+                presence = next_presence;
+                next_presence_check = now + PRESENCE_CHECK_INTERVAL;
+            }
+
+            let heartbeat_due = last_sent
+                .as_ref()
+                .map(|state| now.duration_since(state.sent_at) >= HEARTBEAT_INTERVAL)
+                .unwrap_or(true);
+            let fallback_due = now >= next_fallback;
+            should_sample |= heartbeat_due || fallback_due;
+
+            if !should_sample {
+                continue;
+            }
+
+            if accessibility_event_due {
+                accessibility_event_deferred = false;
+                last_accessibility_sample_at = Some(now);
+            }
+
+            let foreground_pid = emit_sample(
                 &device_id,
                 &agent_name,
                 &capture_filters,
                 &tx,
-                &last_sent,
-                &last_read_error_at,
+                &mut last_sent,
+                &mut last_read_error_at,
+                presence,
             );
+            accessibility_monitor.bind(foreground_pid);
+
+            let fallback_interval = if last_sent
+                .as_ref()
+                .map(|state| needs_tab_fallback(&state.app))
+                .unwrap_or(false)
+            {
+                TAB_FALLBACK_INTERVAL
+            } else {
+                HEARTBEAT_INTERVAL
+            };
+            next_fallback = Instant::now() + fallback_interval;
         }
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_sample(
     device_id: &str,
     agent_name: &str,
     capture_filters: &CaptureFilters,
     tx: &mpsc::Sender<ActivityEnvelope>,
-    last_sent: &Arc<Mutex<Option<LastSentState>>>,
-    last_read_error_at: &Arc<Mutex<Option<Instant>>>,
-) {
-    let presence = current_presence();
-    let previous = last_sent.lock().expect("snapshot mutex poisoned").clone();
+    last_sent: &mut Option<LastSentState>,
+    last_read_error_at: &mut Option<Instant>,
+    presence: PresenceState,
+) -> Option<i32> {
+    let previous = last_sent.clone();
     let now = Instant::now();
-    let sample_due = previous
-        .as_ref()
-        .map(|state| now.duration_since(state.sent_at) >= SAMPLE_INTERVAL)
-        .unwrap_or(true);
-    let presence_changed = previous
-        .as_ref()
-        .map(|state| state.presence != presence)
-        .unwrap_or(true);
 
-    let current_identity = current_frontmost_identity();
-    let app_changed = match (previous.as_ref(), current_identity.as_ref()) {
-        (Some(previous), Some(current)) => {
-            previous.app.id != current.id || previous.app.pid != current.pid
+    let mut current = match current_foreground_app() {
+        Some(current) => {
+            *last_read_error_at = None;
+            current
         }
-        (None, Some(_)) | (Some(_), None) => true,
-        (None, None) => true,
-    };
-
-    if !(app_changed || presence_changed || sample_due) {
-        return;
-    }
-
-    let needs_full_snapshot = app_changed || previous.is_none();
-    let mut current = if needs_full_snapshot {
-        match current_foreground_app() {
-            Some(current) => {
-                *last_read_error_at.lock().expect("error mutex poisoned") = None;
-                current
-            }
-            None => {
-                throttle_read_error(last_read_error_at);
-                previous
-                    .as_ref()
-                    .map(previous_as_foreground)
-                    .unwrap_or_else(|| synthetic_foreground_app(presence))
-            }
+        None => {
+            throttle_read_error(last_read_error_at);
+            previous
+                .as_ref()
+                .map(previous_as_foreground)
+                .unwrap_or_else(|| synthetic_foreground_app(presence))
         }
-    } else {
-        previous
-            .as_ref()
-            .map(previous_as_foreground)
-            .unwrap_or_else(|| synthetic_foreground_app(presence))
     };
+    let observer_pid = current.app.pid.and_then(|pid| i32::try_from(pid).ok());
+
     if is_system_process(&current.app.name) {
         current = synthetic_foreground_app(presence);
     }
 
+    let app_changed = previous
+        .as_ref()
+        .map(|state| state.app.id != current.app.id || state.app.pid != current.app.pid)
+        .unwrap_or(true);
     let browser = if app_changed || is_browser_app(&current.app) {
         stabilize_browser_context(
-            detect_browser_context(&current.app, current.window_title.as_deref()),
+            detect_browser_context_for_macos(
+                &current.app,
+                current.window_title.as_deref(),
+                current.native_browser_page.clone(),
+            ),
             previous.as_ref(),
             &current.app,
             current.window_title.as_deref(),
@@ -191,19 +240,39 @@ fn emit_sample(
         current.window_title.clone(),
         browser,
     );
-
     let marker = LastApp {
         bundle_id: filtered.app.id.clone(),
         pid: filtered.app.pid,
         page_signature: page_signature(filtered.browser.as_ref(), filtered.window_title.as_deref()),
     };
+
+    if filtered.mode == PrivacyMode::Skip {
+        *last_sent = Some(LastSentState {
+            marker,
+            app: filtered.app,
+            window_title: None,
+            browser: None,
+            presence,
+            sent_at: now,
+            source: current.source,
+        });
+        return observer_pid;
+    }
+
     let marker_changed = previous
         .as_ref()
         .map(|state| state.marker != marker)
         .unwrap_or(true);
-
-    if !(marker_changed || presence_changed || sample_due) {
-        return;
+    let presence_changed = previous
+        .as_ref()
+        .map(|state| state.presence != presence)
+        .unwrap_or(true);
+    let heartbeat_due = previous
+        .as_ref()
+        .map(|state| now.duration_since(state.sent_at) >= HEARTBEAT_INTERVAL)
+        .unwrap_or(true);
+    if !(marker_changed || presence_changed || heartbeat_due) {
+        return observer_pid;
     }
 
     let kind = if marker_changed {
@@ -213,13 +282,14 @@ fn emit_sample(
     } else {
         "activity_sample"
     };
-
     if marker_changed || presence_changed {
         info!(
             app_name = %filtered.app.name,
             bundle_id = %filtered.app.id,
             pid = ?filtered.app.pid,
+            window_title = filtered.window_title.as_deref().unwrap_or("n/a"),
             presence = ?presence,
+            source = current.source,
             kind,
             "activity sampled"
         );
@@ -229,26 +299,27 @@ fn emit_sample(
         device_id,
         agent_name,
         "macos",
-        "nsworkspace",
+        current.source,
         kind,
         filtered.app.clone(),
         filtered.window_title.clone(),
         filtered.browser.clone(),
         presence,
     );
-
     if !send_activity(tx, event) {
-        return;
+        return observer_pid;
     }
 
-    *last_sent.lock().expect("snapshot mutex poisoned") = Some(LastSentState {
+    *last_sent = Some(LastSentState {
         marker,
         app: filtered.app,
         window_title: filtered.window_title,
         browser: filtered.browser,
         presence,
         sent_at: now,
+        source: current.source,
     });
+    observer_pid
 }
 
 fn current_presence() -> PresenceState {
@@ -261,131 +332,66 @@ fn current_presence() -> PresenceState {
     }
 }
 
-fn throttle_read_error(last_read_error_at: &Arc<Mutex<Option<Instant>>>) {
+fn throttle_read_error(last_read_error_at: &mut Option<Instant>) {
     let now = Instant::now();
-    let mut guard = last_read_error_at.lock().expect("error mutex poisoned");
-    let should_log = guard
+    let should_log = last_read_error_at
         .map(|at| now.duration_since(at) >= LOG_THROTTLE_INTERVAL)
         .unwrap_or(true);
     if should_log {
         warn!("cannot read frontmost app on macOS");
-        *guard = Some(now);
+        *last_read_error_at = Some(now);
     }
 }
 
 fn current_foreground_app() -> Option<ForegroundApp> {
-    let script_snapshot = read_frontmost_app_snapshot();
-
-    autoreleasepool(|_| {
-        let workspace = NSWorkspace::sharedWorkspace();
-        let frontmost = workspace.frontmostApplication();
-
-        match (script_snapshot, frontmost) {
-            (Some((app_name, pid, window_title)), _) => {
-                let running = NSRunningApplication::runningApplicationWithProcessIdentifier(pid);
-                Some(ForegroundApp {
-                    app: running
-                        .as_deref()
-                        .map(|app| app_from_running_app(app, Some(app_name.clone()), pid))
-                        .unwrap_or_else(|| fallback_app_info(app_name, pid)),
-                    window_title,
-                })
-            }
-            (None, Some(app)) => Some(ForegroundApp {
-                app: app_from_running_app(&app, None, app.processIdentifier() as i32),
-                window_title: None,
-            }),
-            (None, None) => None,
-        }
-    })
-}
-
-fn current_frontmost_identity() -> Option<AppInfo> {
     autoreleasepool(|_| {
         let workspace = NSWorkspace::sharedWorkspace();
         let app = workspace.frontmostApplication()?;
-        Some(app_from_running_app(
-            &app,
-            None,
-            app.processIdentifier() as i32,
-        ))
+        let pid = app.processIdentifier();
+        if pid <= 0 {
+            return None;
+        }
+
+        let app_info = app_from_running_app(&app, pid);
+        let is_browser = is_browser_app(&app_info);
+        let native = read_window_snapshot(pid, is_browser);
+        let window_title = normalize_window_title(&app_info, native.window_title);
+        let native_browser_page = is_browser.then(|| NativeBrowserPage {
+            page_title: None,
+            url: native.browser_url.clone(),
+            source: native.source,
+            confidence: if native.browser_url.is_some() {
+                0.96
+            } else {
+                0.42
+            },
+        });
+
+        Some(ForegroundApp {
+            app: app_info,
+            window_title,
+            native_browser_page,
+            source: native.source,
+        })
     })
 }
 
-fn read_frontmost_app_snapshot() -> Option<(String, i32, Option<String>)> {
-    let script = format!(
-        r#"
-tell application "System Events"
-    set frontApp to first application process whose frontmost is true
-    set appName to name of frontApp
-    set appPid to unix id of frontApp
-    set windowTitle to ""
-    try
-        set windowTitle to name of front window of frontApp
-    end try
-    return appName & "{delimiter}" & (appPid as string) & "{delimiter}" & windowTitle
-end tell
-"#,
-        delimiter = FRONT_APP_DELIMITER
-    );
-
-    let output = Command::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8(output.stdout).ok()?;
-    let trimmed = stdout.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let mut parts = trimmed.splitn(3, FRONT_APP_DELIMITER);
-    let app_name = parts.next()?.trim().to_string();
-    let pid = parts.next()?.trim().parse::<i32>().ok()?;
-    let window_title = parts
-        .next()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-
-    Some((app_name, pid, window_title))
-}
-
-fn app_from_running_app(
-    app: &NSRunningApplication,
-    preferred_name: Option<String>,
-    pid: i32,
-) -> AppInfo {
+fn app_from_running_app(app: &NSRunningApplication, pid: i32) -> AppInfo {
     let bundle_id = app
         .bundleIdentifier()
         .map(|id| id.to_string())
         .filter(|id| !id.trim().is_empty())
         .unwrap_or_else(|| format!("pid:{pid}"));
-    let name = preferred_name.unwrap_or_else(|| {
-        app.localizedName()
-            .map(|name| name.to_string())
-            .filter(|name| !name.trim().is_empty())
-            .unwrap_or_else(|| bundle_id.clone())
-    });
+    let name = app
+        .localizedName()
+        .map(|name| name.to_string())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| bundle_id.clone());
 
     normalize_app_info(AppInfo {
         id: bundle_id,
         name: name.clone(),
         title: Some(name),
-        pid: u32::try_from(pid).ok(),
-    })
-}
-
-fn fallback_app_info(app_name: String, pid: i32) -> AppInfo {
-    normalize_app_info(AppInfo {
-        id: format!("pid:{pid}"),
-        name: app_name.clone(),
-        title: Some(app_name),
         pid: u32::try_from(pid).ok(),
     })
 }
@@ -423,10 +429,92 @@ fn stabilize_browser_context(
     }
 }
 
+fn needs_tab_fallback(app: &AppInfo) -> bool {
+    if is_browser_app(app) {
+        return true;
+    }
+    is_terminal_app(app)
+}
+
+fn is_terminal_app(app: &AppInfo) -> bool {
+    let id = app.id.to_ascii_lowercase();
+    if [
+        "com.apple.terminal",
+        "com.googlecode.iterm2",
+        "dev.warp.warp-stable",
+        "com.github.wez.wezterm",
+        "net.kovidgoyal.kitty",
+        "org.alacritty",
+        "org.tabby",
+    ]
+    .iter()
+    .any(|candidate| id == *candidate)
+    {
+        return true;
+    }
+
+    let name = app.name.to_ascii_lowercase();
+    [
+        "terminal",
+        "iterm",
+        "warp",
+        "wezterm",
+        "kitty",
+        "alacritty",
+        "tabby",
+        "终端",
+    ]
+    .iter()
+    .any(|candidate| name.contains(candidate))
+}
+
+fn normalize_window_title(app: &AppInfo, title: Option<String>) -> Option<String> {
+    let title = title?;
+    if !is_terminal_app(app) {
+        return Some(title);
+    }
+
+    let without_spinner = title
+        .chars()
+        .filter(|character| !matches!(*character, '\u{2800}'..='\u{28ff}'))
+        .collect::<String>();
+    let collapsed = without_spinner
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let without_dimensions = [" — ", " - ", " | "]
+        .into_iter()
+        .find_map(|separator| {
+            let (head, suffix) = collapsed.rsplit_once(separator)?;
+            terminal_dimensions(suffix).then(|| head.to_string())
+        })
+        .unwrap_or(collapsed);
+    let normalized = without_dimensions.trim();
+    (!normalized.is_empty()).then(|| normalized.to_string())
+}
+
+fn terminal_dimensions(value: &str) -> bool {
+    let value = value.trim();
+    let Some((columns, rows)) = value.split_once('×').or_else(|| value.split_once('x')) else {
+        return false;
+    };
+    !columns.is_empty()
+        && !rows.is_empty()
+        && columns.chars().all(|character| character.is_ascii_digit())
+        && rows.chars().all(|character| character.is_ascii_digit())
+}
+
 fn previous_as_foreground(previous: &LastSentState) -> ForegroundApp {
     ForegroundApp {
         app: previous.app.clone(),
         window_title: previous.window_title.clone(),
+        native_browser_page: previous.browser.as_ref().map(|browser| NativeBrowserPage {
+            page_title: browser.page_title.clone(),
+            url: browser.url.clone(),
+            source: "cached",
+            confidence: browser.confidence,
+        }),
+        source: previous.source,
     }
 }
 
@@ -445,5 +533,49 @@ fn synthetic_foreground_app(presence: PresenceState) -> ForegroundApp {
             pid: None,
         },
         window_title: None,
+        native_browser_page: None,
+        source: "macos-native",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{needs_tab_fallback, normalize_window_title};
+    use crate::event::AppInfo;
+
+    fn app(name: &str, id: &str) -> AppInfo {
+        AppInfo {
+            id: id.to_string(),
+            name: name.to_string(),
+            title: None,
+            pid: Some(1),
+        }
+    }
+
+    #[test]
+    fn browser_and_terminal_apps_keep_low_frequency_fallback() {
+        assert!(needs_tab_fallback(&app(
+            "Google Chrome",
+            "com.google.Chrome"
+        )));
+        assert!(needs_tab_fallback(&app("Terminal", "com.apple.Terminal")));
+        assert!(needs_tab_fallback(&app("iTerm2", "com.googlecode.iterm2")));
+        assert!(!needs_tab_fallback(&app("Finder", "com.apple.finder")));
+    }
+
+    #[test]
+    fn terminal_titles_ignore_spinner_frames_and_window_dimensions() {
+        let terminal = app("终端", "com.apple.Terminal");
+        let first = normalize_window_title(
+            &terminal,
+            Some("Eyes_on_me — ⠧ Eyes_on_me — codex — 224×66".to_string()),
+        );
+        let second = normalize_window_title(
+            &terminal,
+            Some("Eyes_on_me — ⠙ Eyes_on_me — codex — 224×66".to_string()),
+        );
+
+        assert_eq!(first, second);
+        assert_eq!(first.as_deref(), Some("Eyes_on_me — Eyes_on_me — codex"));
     }
 }

@@ -14,7 +14,7 @@ export function buildDeviceUsageTreemap(
     return [];
   }
 
-  const accent = "#4ea57d";
+  const accent = "#17795e";
   const buckets = [...analysis.appUsage].sort((left, right) => right.totalTrackedMs - left.totalTrackedMs);
   if (buckets.length === 0) {
     return [];
@@ -26,7 +26,7 @@ export function buildDeviceUsageTreemap(
   const totalTrackedMs = analysis.totalTrackedMs;
 
   const items = visibleBuckets.map((bucket, index) =>
-    buildUsageLeaf(`app-${index}`, bucket, totalTrackedMs, accent, maxTrackedMs)
+    buildUsageLeaf(bucket.key || `app-${index}`, bucket, totalTrackedMs, accent, maxTrackedMs)
   );
 
   if (hiddenBuckets.length > 0) {

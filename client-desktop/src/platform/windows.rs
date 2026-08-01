@@ -1,5 +1,9 @@
 use std::io;
 use std::path::Path;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -16,7 +20,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::browser::{BrowserContext, detect_browser_context_for_window, page_signature};
-use crate::config::CaptureFilters;
+use crate::config::{CaptureFilters, PrivacyMode};
 use crate::event::{ActivityEnvelope, AppInfo};
 use crate::platform::{
     apply_capture_filters, is_system_process, normalize_app_info, send_activity,
@@ -54,6 +58,7 @@ pub fn run_foreground_watcher(
     device_id: String,
     agent_name: String,
     capture_filters: CaptureFilters,
+    recording_enabled: Arc<AtomicBool>,
     tx: mpsc::Sender<ActivityEnvelope>,
 ) -> Result<()> {
     info!("foreground watcher started (Windows polling sampler)");
@@ -61,6 +66,11 @@ pub fn run_foreground_watcher(
     let mut last_sent: Option<LastSentState> = None;
 
     loop {
+        if !recording_enabled.load(Ordering::Acquire) {
+            last_sent = None;
+            thread::sleep(POLL_INTERVAL);
+            continue;
+        }
         emit_sample(
             &device_id,
             &agent_name,
@@ -112,6 +122,17 @@ fn emit_sample(
     };
 
     let now = Instant::now();
+    if filtered.mode == PrivacyMode::Skip {
+        *last_sent = Some(LastSentState {
+            marker,
+            app: filtered.app,
+            window_title: None,
+            browser: None,
+            presence,
+            sent_at: now,
+        });
+        return;
+    }
     let marker_changed = last_sent
         .as_ref()
         .map(|state| state.marker != marker)

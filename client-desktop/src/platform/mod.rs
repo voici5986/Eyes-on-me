@@ -5,11 +5,14 @@ use tracing::warn;
 use url::Url;
 
 use crate::browser::BrowserContext;
-use crate::config::CaptureFilters;
+use crate::config::{CaptureFilters, PrivacyMode};
 use crate::event::{ActivityEnvelope, AppInfo};
 
 #[cfg(target_os = "macos")]
 pub mod macos;
+
+#[cfg(target_os = "macos")]
+pub(crate) mod macos_native;
 
 #[cfg(target_os = "windows")]
 pub mod windows;
@@ -58,10 +61,26 @@ pub(crate) fn send_activity(
     false
 }
 
+pub(crate) fn accessibility_permission_status() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        if macos_native::accessibility_is_trusted() {
+            "granted"
+        } else {
+            "missing"
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "not_required"
+    }
+}
+
 pub(crate) struct FilteredCapture {
     pub app: AppInfo,
     pub window_title: Option<String>,
     pub browser: Option<BrowserContext>,
+    pub mode: PrivacyMode,
 }
 
 pub(crate) fn apply_capture_filters(
@@ -70,35 +89,39 @@ pub(crate) fn apply_capture_filters(
     mut window_title: Option<String>,
     browser: Option<BrowserContext>,
 ) -> FilteredCapture {
-    if matches_ignored_app(filters, &app) {
-        let label = "Ignored Application".to_string();
-        return FilteredCapture {
-            app: AppInfo {
-                id: "filtered.app".to_string(),
-                name: label.clone(),
-                title: Some(label.clone()),
-                pid: None,
-            },
-            window_title: Some(label),
-            browser: None,
-        };
-    }
-
-    if matches_ignored_domain(filters, browser.as_ref()) {
-        let label = "Ignored Website".to_string();
-        app.title = Some(label.clone());
-        window_title = Some(label);
-        return FilteredCapture {
+    let mode = most_private(
+        matching_app_mode(filters, &app).unwrap_or(filters.default_mode),
+        matching_domain_mode(filters, browser.as_ref()).unwrap_or(PrivacyMode::Record),
+    );
+    match mode {
+        PrivacyMode::Record => FilteredCapture {
             app,
             window_title,
-            browser: None,
-        };
-    }
-
-    FilteredCapture {
-        app,
-        window_title,
-        browser,
+            browser,
+            mode,
+        },
+        PrivacyMode::Anonymize => {
+            let app_name = app.name.clone();
+            app.id = format!("privacy.anonymized:{}", normalize_match_name(&app_name));
+            app.title = None;
+            app.pid = None;
+            window_title = Some("Private Activity".to_string());
+            FilteredCapture {
+                app,
+                window_title,
+                browser: None,
+                mode,
+            }
+        }
+        PrivacyMode::Skip => {
+            app.title = None;
+            FilteredCapture {
+                app,
+                window_title: None,
+                browser: None,
+                mode,
+            }
+        }
     }
 }
 
@@ -114,30 +137,30 @@ pub(crate) fn normalize_app_info(mut app: AppInfo) -> AppInfo {
     app
 }
 
-fn matches_ignored_app(filters: &CaptureFilters, app: &AppInfo) -> bool {
-    if filters.ignored_apps.is_empty() {
-        return false;
-    }
-
+fn matching_app_mode(filters: &CaptureFilters, app: &AppInfo) -> Option<PrivacyMode> {
     let normalized_name = normalize_match_name(&app.name);
     let normalized_id =
         normalize_match_name(app.id.rsplit(['/', '\\']).next().unwrap_or(app.id.as_str()));
 
-    filters.ignored_apps.iter().any(|rule| {
-        let normalized_rule = normalize_match_name(rule);
-        !normalized_rule.is_empty()
-            && (normalized_name.contains(&normalized_rule)
-                || normalized_rule.contains(&normalized_name)
-                || normalized_id.contains(&normalized_rule)
-                || normalized_rule.contains(&normalized_id))
-    })
+    filters
+        .app_rules
+        .iter()
+        .filter_map(|rule| {
+            let normalized_rule = normalize_match_name(&rule.pattern);
+            (!normalized_rule.is_empty()
+                && (normalized_name.contains(&normalized_rule)
+                    || normalized_rule.contains(&normalized_name)
+                    || normalized_id.contains(&normalized_rule)
+                    || normalized_rule.contains(&normalized_id)))
+            .then_some(rule.mode)
+        })
+        .reduce(most_private)
 }
 
-fn matches_ignored_domain(filters: &CaptureFilters, browser: Option<&BrowserContext>) -> bool {
-    if filters.ignored_domains.is_empty() {
-        return false;
-    }
-
+fn matching_domain_mode(
+    filters: &CaptureFilters,
+    browser: Option<&BrowserContext>,
+) -> Option<PrivacyMode> {
     let target_domain = browser.and_then(|browser| {
         browser
             .domain
@@ -146,16 +169,25 @@ fn matches_ignored_domain(filters: &CaptureFilters, browser: Option<&BrowserCont
             .or_else(|| browser.url.as_deref().and_then(normalize_domain_rule))
     });
 
-    let Some(target_domain) = target_domain else {
-        return false;
-    };
+    let target_domain = target_domain?;
 
-    filters.ignored_domains.iter().any(|rule| {
-        let Some(rule_domain) = normalize_domain_rule(rule) else {
-            return false;
-        };
-        target_domain == rule_domain || target_domain.ends_with(&format!(".{rule_domain}"))
-    })
+    filters
+        .domain_rules
+        .iter()
+        .filter_map(|rule| {
+            let rule_domain = normalize_domain_rule(&rule.pattern)?;
+            (target_domain == rule_domain || target_domain.ends_with(&format!(".{rule_domain}")))
+                .then_some(rule.mode)
+        })
+        .reduce(most_private)
+}
+
+fn most_private(left: PrivacyMode, right: PrivacyMode) -> PrivacyMode {
+    match (left, right) {
+        (PrivacyMode::Skip, _) | (_, PrivacyMode::Skip) => PrivacyMode::Skip,
+        (PrivacyMode::Anonymize, _) | (_, PrivacyMode::Anonymize) => PrivacyMode::Anonymize,
+        _ => PrivacyMode::Record,
+    }
 }
 
 fn normalize_match_name(value: &str) -> String {
@@ -270,7 +302,7 @@ mod tests {
 
     use crate::{
         browser::BrowserContext,
-        config::CaptureFilters,
+        config::{CaptureFilters, PrivacyMode, PrivacyRule},
         event::{ActivityEnvelope, AppInfo},
     };
 
@@ -306,8 +338,11 @@ mod tests {
     fn filters_ignored_apps_to_generic_activity() {
         let filtered = apply_capture_filters(
             &CaptureFilters {
-                ignored_apps: vec!["WeChat".to_string()],
-                ignored_domains: Vec::new(),
+                app_rules: vec![PrivacyRule {
+                    pattern: "WeChat".to_string(),
+                    mode: PrivacyMode::Anonymize,
+                }],
+                ..CaptureFilters::default()
             },
             AppInfo {
                 id: "/Applications/WeChat.app".to_string(),
@@ -319,11 +354,8 @@ mod tests {
             None,
         );
 
-        assert_eq!(filtered.app.name, "Ignored Application");
-        assert_eq!(
-            filtered.window_title.as_deref(),
-            Some("Ignored Application")
-        );
+        assert_eq!(filtered.app.name, "WeChat");
+        assert_eq!(filtered.window_title.as_deref(), Some("Private Activity"));
         assert!(filtered.browser.is_none());
     }
 
@@ -331,8 +363,11 @@ mod tests {
     fn filters_ignored_domains_without_hiding_browser_app() {
         let filtered = apply_capture_filters(
             &CaptureFilters {
-                ignored_apps: Vec::new(),
-                ignored_domains: vec!["github.com".to_string()],
+                domain_rules: vec![PrivacyRule {
+                    pattern: "github.com".to_string(),
+                    mode: PrivacyMode::Anonymize,
+                }],
+                ..CaptureFilters::default()
             },
             AppInfo {
                 id: "com.google.Chrome".to_string(),
@@ -353,8 +388,37 @@ mod tests {
         );
 
         assert_eq!(filtered.app.name, "Google Chrome");
-        assert_eq!(filtered.window_title.as_deref(), Some("Ignored Website"));
+        assert_eq!(filtered.window_title.as_deref(), Some("Private Activity"));
         assert!(filtered.browser.is_none());
+    }
+
+    #[test]
+    fn chooses_the_strictest_matching_privacy_rule() {
+        let filtered = apply_capture_filters(
+            &CaptureFilters {
+                app_rules: vec![
+                    PrivacyRule {
+                        pattern: "Chrome".into(),
+                        mode: PrivacyMode::Anonymize,
+                    },
+                    PrivacyRule {
+                        pattern: "Google Chrome".into(),
+                        mode: PrivacyMode::Skip,
+                    },
+                ],
+                ..CaptureFilters::default()
+            },
+            AppInfo {
+                id: "com.google.Chrome".into(),
+                name: "Google Chrome".into(),
+                title: Some("Private".into()),
+                pid: Some(42),
+            },
+            Some("Private".into()),
+            None,
+        );
+        assert_eq!(filtered.mode, PrivacyMode::Skip);
+        assert!(filtered.window_title.is_none());
     }
 
     fn sample_event() -> ActivityEnvelope {

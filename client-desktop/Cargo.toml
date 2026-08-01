@@ -9,16 +9,18 @@ eyes-on-me-shared = { path = "../shared" }
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 hostname = "0.4"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1", features = ["fs", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "2"
 uuid = { version = "1", features = ["serde", "v4"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+accessibility-sys-ng = "0.1.3"
 block2 = "0.6"
 core-foundation = "0.10"
 core-graphics = "0.24"

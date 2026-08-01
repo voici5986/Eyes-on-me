@@ -81,10 +81,10 @@ export function recentActivityDurationMs(
   );
 
   if (!nextForDevice) {
-    return Math.max(0, nowMs - currentTs);
+    return Math.min(120_000, Math.max(0, nowMs - currentTs));
   }
 
-  return Math.max(0, new Date(nextForDevice.ts).getTime() - currentTs);
+  return Math.min(120_000, Math.max(0, new Date(nextForDevice.ts).getTime() - currentTs));
 }
 
 export function formatDuration(ms: number): string {
@@ -139,16 +139,17 @@ export function deriveStatusFromActivity(activity: ActivityEvent | null): string
     return label;
   }
 
+  const context = activity.browser?.pageTitle || activity.windowTitle || activity.app.title;
+  if (context && activity.browser?.domain) {
+    return `正在使用 ${activity.app.name} · ${context}（${activity.browser.domain}）`;
+  }
+
+  if (context) {
+    return `正在使用 ${activity.app.name} · ${context}`;
+  }
+
   if (activity.browser?.domain) {
     return `正在使用 ${activity.app.name} 浏览 ${activity.browser.domain}`;
-  }
-
-  if (activity.browser?.pageTitle) {
-    return `正在使用 ${activity.app.name} 查看 ${activity.browser.pageTitle}`;
-  }
-
-  if (activity.windowTitle) {
-    return `正在使用 ${activity.app.name} · ${activity.windowTitle}`;
   }
 
   return `正在使用 ${activity.app.name}`;

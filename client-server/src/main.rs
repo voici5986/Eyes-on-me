@@ -1,6 +1,13 @@
 mod app_state;
+mod assistant;
+mod auth;
 mod config;
 mod db;
+mod governance;
+mod media;
+mod memory;
+mod remote;
+mod reports;
 mod routes;
 
 use std::{net::SocketAddr, sync::Arc};
@@ -9,7 +16,7 @@ use app_state::AppState;
 use axum::Router;
 use config::Config;
 use tokio::net::TcpListener;
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower_http::trace::TraceLayer;
 use tracing::info;
 
 #[tokio::main]
@@ -24,16 +31,15 @@ async fn main() -> anyhow::Result<()> {
 
     let config = Config::from_env();
     let pool = db::connect(&config.database_url).await?;
-    let snapshot = db::load_snapshot(&pool)
-        .await
-        .unwrap_or_else(|_| eyes_on_me_shared::DashboardSnapshot::demo());
-    let state = Arc::new(AppState::new(snapshot, pool));
+    let snapshot = db::load_snapshot(&pool).await?;
+    let state = Arc::new(AppState::new(snapshot, pool, &config));
+    media::start_maintenance(Arc::clone(&state));
+    remote::start_maintenance(Arc::clone(&state));
 
     let app = Router::new()
         .merge(routes::api_router(state))
         .merge(routes::static_router(config.web_dist_dir.clone()))
-        .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive());
+        .layer(TraceLayer::new_for_http());
 
     let addr = SocketAddr::from((config.host, config.port));
     let listener = TcpListener::bind(addr).await?;
